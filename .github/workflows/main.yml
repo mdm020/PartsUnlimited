@@ -2,9 +2,9 @@ name: PartsUnlimited CI/CD
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ master ]
+    branches: [ main ]
   workflow_dispatch:
 
 env:
@@ -42,19 +42,101 @@ jobs:
     - name: Build solution
       run: msbuild ${{ env.SOLUTION_PATH }} /p:Configuration=${{ env.BUILD_CONFIGURATION }} /p:Platform="Any CPU" /p:DeployOnBuild=true /p:DeployDefaultTarget=WebPublish /p:WebPublishMethod=FileSystem /p:DeleteExistingFiles=True /p:publishUrl="${{ github.workspace }}\publish"
     
-    - name: Run Unit Tests
+    - name: Run Unit Tests with MSTest
+      shell: powershell
       run: |
-        dotnet test ./test/PartsUnlimited.UnitTests/PartsUnlimited.UnitTests.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+        # Find MSTest runner
+        $vsTestPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\TestPlatform\vstest.console.exe"
+        if (-not (Test-Path $vsTestPath)) {
+          $vsTestPath = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\TestPlatform\vstest.console.exe"
+        }
+        if (-not (Test-Path $vsTestPath)) {
+          Write-Host "Searching for vstest.console.exe..."
+          $vsTestPath = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Microsoft Visual Studio" -Filter "vstest.console.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+        }
+        
+        # Create test results directory
+        $testResultsDir = "${{ github.workspace }}\TestResults"
+        New-Item -ItemType Directory -Path $testResultsDir -Force | Out-Null
+        
+        # Find test assemblies
+        $testDlls = Get-ChildItem -Path "${{ github.workspace }}\test" -Filter "*Tests.dll" -Recurse | Where-Object { $_.FullName -like "*\bin\${{ env.BUILD_CONFIGURATION }}\*" -and $_.FullName -notlike "*\ref\*" }
+        
+        Write-Host "Found $($testDlls.Count) test assemblies:"
+        $testDlls | ForEach-Object { Write-Host "  - $($_.FullName)" }
+        
+        if ($testDlls.Count -eq 0) {
+          Write-Warning "No test assemblies found. Skipping tests."
+          exit 0
+        }
+        
+        # Run tests
+        if (Test-Path $vsTestPath) {
+          Write-Host "Using VSTest at: $vsTestPath"
+          & $vsTestPath $testDlls.FullName `
+            /Logger:"trx;LogFileName=test-results.trx" `
+            /ResultsDirectory:$testResultsDir `
+            /Platform:x64
+        } else {
+          Write-Host "VSTest not found, using dotnet test..."
+          $testProjects = Get-ChildItem -Path "${{ github.workspace }}\test" -Filter "*Tests.csproj" -Recurse
+          foreach ($project in $testProjects) {
+            Write-Host "Testing: $($project.Name)"
+            dotnet test $project.FullName `
+              --configuration ${{ env.BUILD_CONFIGURATION }} `
+              --no-build `
+              --logger "trx;LogFileName=$testResultsDir\$($project.BaseName)-results.trx" `
+              --results-directory $testResultsDir
+          }
+        }
+        
+        Write-Host "`nTest execution completed"
       continue-on-error: true
     
+    - name: List test results files
+      if: always()
+      shell: powershell
+      run: |
+        Write-Host "=== Test Results Files ==="
+        $trxFiles = Get-ChildItem -Path "${{ github.workspace }}" -Filter "*.trx" -Recurse -ErrorAction SilentlyContinue
+        if ($trxFiles.Count -gt 0) {
+          $trxFiles | ForEach-Object {
+            Write-Host "Found: $($_.FullName) (Size: $($_.Length) bytes)"
+          }
+        } else {
+          Write-Host "No .trx files found"
+        }
+        
+        Write-Host "`n=== TestResults Directory ==="
+        if (Test-Path "${{ github.workspace }}\TestResults") {
+          Get-ChildItem -Path "${{ github.workspace }}\TestResults" -Recurse | ForEach-Object {
+            Write-Host "$($_.FullName)"
+          }
+        } else {
+          Write-Host "TestResults directory not found"
+        }
+    
     - name: Publish Test Results
-      uses: dorny/test-reporter@v1
+      uses: EnricoMi/publish-unit-test-result-action/windows@v2
       if: always()
       with:
-        name: Unit Test Results
-        path: '**/test-results.trx'
-        reporter: dotnet-trx
-        fail-on-error: false
+        files: |
+          TestResults/**/*.trx
+          **/TestResults/**/*.trx
+        check_name: 'Unit Test Results'
+        comment_mode: off
+      continue-on-error: true
+    
+    - name: Upload Test Results as Artifact
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results
+        path: |
+          TestResults/**/*.trx
+          **/TestResults/**/*.trx
+        if-no-files-found: warn
+        retention-days: 30
     
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
