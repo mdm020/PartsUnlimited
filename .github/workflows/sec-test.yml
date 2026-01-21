@@ -1,0 +1,97 @@
+name: Build, Scan & Deploy .NET to IIS
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  PROJECT_PATH: 'src/PartsUnlimitedWebsite/PartsUnlimitedWebsite.csproj'
+  PUBLISH_PATH: './publish'
+  IIS_SITE_NAME: 'PartsUnlimited'
+  APP_POOL: 'PartsUnlimitedAppPool'
+  DEPLOY_PATH: 'C:\inetpub\wwwroot\PartsUnlimited'
+  PORT: '8080'
+
+jobs:
+  build-scan-deploy:
+    runs-on: windows-latest
+    permissions:
+      security-events: write
+      contents: read
+    
+    steps:
+    # Checkout
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    # GitHub CodeQL Security Scan
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v2
+      with:
+        languages: 'csharp'
+        
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+        
+    - name: Build for Security Scan
+      run: |
+        dotnet restore ${{ env.PROJECT_PATH }}
+        dotnet build ${{ env.PROJECT_PATH }} --configuration Debug
+        
+    - name: Analyze with CodeQL
+      uses: github/codeql-action/analyze@v2
+      
+    # Build
+    - name: Build Release
+      run: |
+        dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore
+        
+    - name: Publish
+      run: |
+        dotnet publish ${{ env.PROJECT_PATH }} `
+          --configuration Release `
+          --output ${{ env.PUBLISH_PATH }} `
+          --runtime win-x64
+          
+    # Deploy to IIS
+    - name: Deploy to IIS
+      shell: pwsh
+      run: |
+        # Stop services
+        Stop-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
+        Stop-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        
+        # Prepare directory
+        if (!(Test-Path "${{ env.DEPLOY_PATH }}")) {
+          New-Item -Path "${{ env.DEPLOY_PATH }}" -ItemType Directory -Force
+        } else {
+          Remove-Item -Path "${{ env.DEPLOY_PATH }}\*" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        
+        # Copy files
+        Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination "${{ env.DEPLOY_PATH }}" -Recurse -Force
+        
+        # Configure IIS
+        $site = Get-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
+        if (!$site) {
+          New-Website -Name "${{ env.IIS_SITE_NAME }}" `
+            -Port ${{ env.PORT }} `
+            -PhysicalPath "${{ env.DEPLOY_PATH }}" `
+            -ApplicationPool "${{ env.APP_POOL }}"
+        }
+        
+        $pool = Get-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
+        if (!$pool) {
+          New-WebAppPool -Name "${{ env.APP_POOL }}"
+        }
+        
+        # Start services
+        Start-WebAppPool -Name "${{ env.APP_POOL }}"
+        Start-Website -Name "${{ env.IIS_SITE_NAME }}"
+        
+        Write-Host "✅ Deployment successful: http://localhost:${{ env.PORT }}"
