@@ -2,10 +2,10 @@ name: CD - Deploy to IIS
 
 on:
   workflow_run:
-    workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
+    workflows: [".NET Framework CI"]   # Replace with your CI workflow name
     types:
       - completed
-  workflow_dispatch:  # allows manual trigger
+  workflow_dispatch:  # Manual trigger
 
 jobs:
   deploy:
@@ -35,15 +35,22 @@ jobs:
       # 4️⃣ Build & Publish Website
       - name: Build & Publish Website
         run: |
-          mkdir artifact
+          # Absolute path for artifact folder
+          $artifactPath = "$PWD\artifact"
+          mkdir $artifactPath -Force
+
+          # Build & publish
           msbuild PartsUnlimited.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=artifact `
-            /p:DeployTarget=WebPublish `
-            /p:OutDir=artifact\
+            /p:PublishUrl=$artifactPath `
+            /p:DeployTarget=WebPublish
+
+          # Verify published files
+          Write-Host "Published files:"
+          Get-ChildItem -Path $artifactPath -Recurse
 
       # 5️⃣ Stop IIS App Pool
       - name: Stop IIS Application Pool
@@ -61,7 +68,7 @@ jobs:
           $destination = $env:IIS_SITE_PATH
           if (Test-Path $destination) {
               $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
+              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force -Verbose
               Write-Host "Backup created at: $backupPath"
           }
 
@@ -69,11 +76,17 @@ jobs:
       - name: Deploy to IIS
         shell: powershell
         run: |
-          $source = "artifact\*"
+          $source = "$PWD\artifact\*"
           $destination = $env:IIS_SITE_PATH
-          Write-Host "Deploying from: $source"
-          Write-Host "Deploying to: $destination"
-          Copy-Item -Path $source -Destination $destination -Recurse -Force
+          Write-Host "Deploying files from $source to $destination"
+          
+          # Ensure destination exists
+          if (-not (Test-Path $destination)) {
+              mkdir $destination
+          }
+
+          # Copy all files
+          Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
           Write-Host "✅ Deployment completed successfully"
 
       # 8️⃣ Start IIS App Pool
@@ -85,13 +98,13 @@ jobs:
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 10   # allow IIS to warm up
 
-      # 9️⃣ Verify website with retry (hardcoded URL)
+      # 9️⃣ Verify website with retry
       - name: Verify deployment
         shell: powershell
         run: |
           $url = $env:IIS_SITE_URL
-          $maxRetries = 5
-          $delaySeconds = 5
+          $maxRetries = 10
+          $delaySeconds = 10
           $success = $false
 
           Write-Host "Verifying website: $url"
