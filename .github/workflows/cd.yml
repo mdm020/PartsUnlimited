@@ -84,20 +84,7 @@ jobs:
           Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
           Write-Host "✅ Deployment completed successfully"
 
-      # 8️⃣ Run EF Migrations
-      - name: Apply EF Database Migrations
-        shell: powershell
-        run: |
-          Write-Host "Applying EF migrations..."
-          # Path to your website project (where Packages\EF Tools is)
-          $projectPath = "$PWD\src\PartsUnlimitedWebsite"
-          
-          # Ensure PowerShell can load EF tools
-          Import-Module "$projectPath\packages\EntityFramework.6.6.0\tools\EntityFramework.psd1" -Force
-
-          # Update database
-          Update-Database -ProjectName PartsUnlimitedWebsite -StartUpProjectName PartsUnlimitedWebsite -Verbose
-          Write-Host "✅ Database updated successfully"
+     
 
       # 9️⃣ Start IIS App Pool
       - name: Start IIS Application Pool
@@ -108,34 +95,4 @@ jobs:
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 15   # give IIS some time to start
 
-      # 🔟 Verify website
-      - name: Verify deployment
-        shell: powershell
-        run: |
-          $url = $env:IIS_SITE_URL
-          $maxRetries = 10
-          $delaySeconds = 10
-          $success = $false
-
-          Write-Host "Verifying website: $url"
-
-          for ($i=1; $i -le $maxRetries; $i++) {
-              try {
-                  $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
-                  if ($response.StatusCode -eq 200) {
-                      Write-Host "Website is responding successfully ✅"
-                      $success = $true
-                      break
-                  } else {
-                      Write-Warning "Attempt ${i}: Website returned status code $($response.StatusCode)"
-                  }
-              } catch {
-                  Write-Warning "Attempt ${i}: Website not reachable yet"
-              }
-              Start-Sleep -Seconds $delaySeconds
-          }
-
-          if (-not $success) {
-              Write-Error "Website verification failed after $maxRetries attempts ❌"
-              exit 1
-          }
+      
