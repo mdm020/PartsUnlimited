@@ -26,13 +26,21 @@ jobs:
       - name: Build solution
         run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /m
 
-      - name: Run Unit Tests
-        uses: microsoft/vstest-action@v1.2.0
-        with:
-          testAssemblyVer2: |
-            **\bin\Release\*UnitTests.dll
-            **\bin\Release\*Tests.dll
-          searchFolder: ${{ github.workspace }}
+      - name: Run Unit Tests (MSTest)
+        shell: pwsh
+        run: |
+          $vsTestPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find **\vstest.console.exe
+
+          Write-Host "Using VsTest at: $vsTestPath"
+
+          & "$vsTestPath" `
+            **\bin\Release\*UnitTests.dll `
+            **\bin\Release\*Tests.dll `
+            /Platform:x64
 
       - name: Prepare artifacts
         run: |
