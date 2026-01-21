@@ -121,48 +121,19 @@ jobs:
         run: |
           Import-Module WebAdministration
           
-          # Create app pool if doesn't exist
-          if (-not (Test-Path "IIS:\AppPools\$env:IIS_APP_POOL_NAME")) {
-            New-WebAppPool -Name $env:IIS_APP_POOL_NAME
-            Write-Host "Created app pool"
-          }
+          # Stop, copy, start - simple as that
+          Stop-WebAppPool -Name "PartsUnlimitedAppPool" -ErrorAction Ignore
+          Start-Sleep -Seconds 2
           
-          # Create website if doesn't exist
-          if (-not (Test-Path "IIS:\Sites\$env:IIS_SITE_NAME")) {
-            New-Item -Path "IIS:\Sites\$env:IIS_SITE_NAME" -Bindings @{protocol="http";bindingInformation="*:8080:"} -PhysicalPath $env:IIS_PHYSICAL_PATH
-            Set-ItemProperty "IIS:\Sites\$env:IIS_SITE_NAME" -Name applicationPool -Value $env:IIS_APP_POOL_NAME
-            Write-Host "Created website"
-          }
+          Copy-Item -Path ".\artifacts\*" -Destination "C:\inetpub\wwwroot\PartsUnlimited" -Recurse -Force
           
-          # Stop app pool if running
-          $poolState = (Get-WebAppPoolState -Name $env:IIS_APP_POOL_NAME).Value
-          if ($poolState -ne "Stopped") {
-            Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
-            Start-Sleep -Seconds 3
-          }
+          Start-WebAppPool -Name "PartsUnlimitedAppPool" -ErrorAction Ignore
+          Start-Website -Name "PartsUnlimited" -ErrorAction Ignore
           
-          # Copy files to IIS directory
-          Copy-Item -Path ".\artifacts\*" -Destination $env:IIS_PHYSICAL_PATH -Recurse -Force
-          
-          # Start app pool and website
-          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Website -Name $env:IIS_SITE_NAME
-          
-          Write-Host "Deployed successfully to http://localhost:8080"
-        env:
-          IIS_SITE_NAME: PartsUnlimited
-          IIS_APP_POOL_NAME: PartsUnlimitedAppPool
-          IIS_PHYSICAL_PATH: C:\inetpub\wwwroot\PartsUnlimited
+          Write-Host "Deployed to http://localhost:8080"
       
       # Verify deployment
       - name: Verify deployment
         shell: powershell
         run: |
-          Import-Module WebAdministration
-          $status = Get-WebAppPoolState -Name $env:IIS_APP_POOL_NAME
-          Write-Host "App Pool: $($status.Value)"
-          $site = Get-Website -Name $env:IIS_SITE_NAME
-          Write-Host "Website: $($site.State)"
-        env:
-          IIS_SITE_NAME: PartsUnlimited
-          IIS_APP_POOL_NAME: PartsUnlimitedAppPool
+          Write-Host "Deployment complete - check http://localhost:8080"
