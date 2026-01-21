@@ -93,48 +93,101 @@ jobs:
         Write-Host "`nTest execution completed"
       continue-on-error: true
     
-    - name: List test results files
+    - name: Check for test results
       if: always()
+      id: check_tests
       shell: powershell
       run: |
-        Write-Host "=== Test Results Files ==="
+        Write-Host "=== Searching for Test Results ==="
         $trxFiles = Get-ChildItem -Path "${{ github.workspace }}" -Filter "*.trx" -Recurse -ErrorAction SilentlyContinue
+        
         if ($trxFiles.Count -gt 0) {
+          Write-Host "Found $($trxFiles.Count) test result file(s):"
           $trxFiles | ForEach-Object {
-            Write-Host "Found: $($_.FullName) (Size: $($_.Length) bytes)"
+            Write-Host "  - $($_.FullName) (Size: $($_.Length) bytes)"
           }
+          echo "has_results=true" >> $env:GITHUB_OUTPUT
         } else {
-          Write-Host "No .trx files found"
+          Write-Host "No test result files found"
+          echo "has_results=false" >> $env:GITHUB_OUTPUT
+        }
+    
+    - name: Parse and display test results
+      if: always() && steps.check_tests.outputs.has_results == 'true'
+      shell: powershell
+      run: |
+        Write-Host "`n=== Test Results Summary ===" -ForegroundColor Cyan
+        
+        $trxFiles = Get-ChildItem -Path "${{ github.workspace }}" -Filter "*.trx" -Recurse
+        $totalTests = 0
+        $totalPassed = 0
+        $totalFailed = 0
+        $totalSkipped = 0
+        
+        foreach ($file in $trxFiles) {
+          Write-Host "`nProcessing: $($file.Name)" -ForegroundColor Yellow
+          
+          try {
+            [xml]$trx = Get-Content $file.FullName
+            $results = $trx.TestRun.ResultSummary
+            
+            $outcome = $results.outcome
+            $total = [int]$results.Counters.total
+            $executed = [int]$results.Counters.executed
+            $passed = [int]$results.Counters.passed
+            $failed = [int]$results.Counters.failed
+            $notExecuted = $total - $executed
+            
+            Write-Host "  Total: $total | Passed: $passed | Failed: $failed | Skipped: $notExecuted"
+            Write-Host "  Outcome: $outcome" -ForegroundColor $(if($outcome -eq "Completed") { "Green" } else { "Red" })
+            
+            $totalTests += $total
+            $totalPassed += $passed
+            $totalFailed += $failed
+            $totalSkipped += $notExecuted
+            
+          } catch {
+            Write-Host "  Could not parse test results: $_" -ForegroundColor Red
+          }
         }
         
-        Write-Host "`n=== TestResults Directory ==="
-        if (Test-Path "${{ github.workspace }}\TestResults") {
-          Get-ChildItem -Path "${{ github.workspace }}\TestResults" -Recurse | ForEach-Object {
-            Write-Host "$($_.FullName)"
-          }
-        } else {
-          Write-Host "TestResults directory not found"
+        Write-Host "`n=== Overall Summary ===" -ForegroundColor Cyan
+        Write-Host "Total Tests: $totalTests"
+        Write-Host "Passed: $totalPassed" -ForegroundColor Green
+        Write-Host "Failed: $totalFailed" -ForegroundColor $(if($totalFailed -gt 0) { "Red" } else { "Green" })
+        Write-Host "Skipped: $totalSkipped" -ForegroundColor Yellow
+        
+        $passRate = if($totalTests -gt 0) { [math]::Round(($totalPassed / $totalTests) * 100, 2) } else { 0 }
+        Write-Host "Pass Rate: $passRate%" -ForegroundColor $(if($passRate -ge 80) { "Green" } elseif($passRate -ge 60) { "Yellow" } else { "Red" })
+        
+        # Set job summary
+        $summary = @"
+        ## Test Results Summary
+        
+        | Metric | Count |
+        |--------|-------|
+        | Total Tests | $totalTests |
+        | ✅ Passed | $totalPassed |
+        | ❌ Failed | $totalFailed |
+        | ⏭️ Skipped | $totalSkipped |
+        | Pass Rate | $passRate% |
+        "@
+        
+        echo $summary >> $env:GITHUB_STEP_SUMMARY
+        
+        # Fail the build if tests failed
+        if ($totalFailed -gt 0) {
+          Write-Host "`n❌ Build failed due to test failures" -ForegroundColor Red
+          exit 1
         }
     
-    - name: Publish Test Results
-      uses: EnricoMi/publish-unit-test-result-action/windows@v2
-      if: always()
-      with:
-        files: |
-          TestResults/**/*.trx
-          **/TestResults/**/*.trx
-        check_name: 'Unit Test Results'
-        comment_mode: off
-      continue-on-error: true
-    
     - name: Upload Test Results as Artifact
-      if: always()
+      if: always() && steps.check_tests.outputs.has_results == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: test-results
         path: |
-          TestResults/**/*.trx
-          **/TestResults/**/*.trx
+          ${{ github.workspace }}/TestResults/**/*.trx
         if-no-files-found: warn
         retention-days: 30
     
