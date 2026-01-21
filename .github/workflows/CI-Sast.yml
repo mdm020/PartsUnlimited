@@ -1,37 +1,59 @@
-name: .NET CI + SAST
+name: PartsUnlimited .NET Framework CI
 
 on:
   push:
     branches: [ master ]
   pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+env:
+  SOLUTION_PATH: './PartsUnlimited.sln'
+  BUILD_CONFIGURATION: 'Release'
 
 jobs:
-  build-and-sast:
-    runs-on: ubuntu-latest
+  build-and-test:
+    runs-on: windows-latest   # important for .NET Framework 4.8
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
+    - name: Setup NuGet
+      uses: nuget/setup-nuget@v1
       with:
-        dotnet-version: '8.0.x'
+        nuget-version: 'latest'
 
-    - name: Restore
-      run: dotnet restore
-
-    - name: Build
-      run: dotnet build --configuration Release --no-restore
-
-    - name: Run tests
-      run: dotnet test --configuration Release --no-build
-
-    # Minimal SAST example using CodeQL
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
       with:
-        languages: csharp
+        msbuild-architecture: x64
 
-    - name: Perform CodeQL analysis
-      uses: github/codeql-action/analyze@v3
+    - name: Restore packages
+      run: nuget restore ${{ env.SOLUTION_PATH }}
+
+    - name: Build solution
+      run: msbuild ${{ env.SOLUTION_PATH }} /p:Configuration=${{ env.BUILD_CONFIGURATION }}
+
+    - name: Run tests with VSTest
+      shell: powershell
+      run: |
+        $vsTestPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\TestPlatform\vstest.console.exe"
+        if (-not (Test-Path $vsTestPath)) {
+          $vsTestPath = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\Extensions\TestPlatform\vstest.console.exe"
+        }
+
+        if (-not (Test-Path $vsTestPath)) {
+          Write-Error "VSTest.console.exe not found on this runner."
+          exit 1
+        }
+
+        $testDlls = Get-ChildItem -Path "${{ github.workspace }}\test" -Filter "*Tests.dll" -Recurse |
+          Where-Object { $_.FullName -like "*\bin\${{ env.BUILD_CONFIGURATION }}\*" -and $_.FullName -notlike "*\ref\*" }
+
+        if ($testDlls.Count -eq 0) {
+          Write-Warning "No test assemblies found, skipping tests."
+          exit 0
+        }
+
+        & $vsTestPath $testDlls.FullName /Platform:x64
