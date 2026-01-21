@@ -2,10 +2,10 @@ name: CD - Deploy to IIS
 
 on:
   workflow_run:
-    workflows: ["CI - Build and Test"]   # Replace with your CI workflow name
+    workflows: [".NET Framework CI"]   # Replace with your CI workflow name
     types:
       - completed
-  workflow_dispatch:  # Manual trigger
+  workflow_dispatch:  # allows manual trigger
 
 jobs:
   deploy:
@@ -14,7 +14,7 @@ jobs:
     env:
       IIS_APP_POOL_NAME: PartsUnlimitedAppPool
       IIS_SITE_PATH: C:\inetpub\wwwroot\PartsUnlimited
-      IIS_SITE_URL: http://localhost:8080/PartsUnlimited
+      IIS_SITE_URL: http://localhost:8080/
 
     steps:
       # 1️⃣ Checkout repository
@@ -35,11 +35,9 @@ jobs:
       # 4️⃣ Build & Publish Website
       - name: Build & Publish Website
         run: |
-          # Absolute path for artifact folder
           $artifactPath = "$PWD\artifact"
           mkdir $artifactPath -Force
 
-          # Build & publish
           msbuild PartsUnlimited.sln `
             /p:Configuration=Release `
             /p:Platform="Any CPU" `
@@ -48,7 +46,6 @@ jobs:
             /p:PublishUrl=$artifactPath `
             /p:DeployTarget=WebPublish
 
-          # Verify published files
           Write-Host "Published files:"
           Get-ChildItem -Path $artifactPath -Recurse
 
@@ -80,12 +77,10 @@ jobs:
           $destination = $env:IIS_SITE_PATH
           Write-Host "Deploying files from $source to $destination"
           
-          # Ensure destination exists
           if (-not (Test-Path $destination)) {
               mkdir $destination
           }
 
-          # Copy all files
           Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
           Write-Host "✅ Deployment completed successfully"
 
@@ -96,7 +91,7 @@ jobs:
           Import-Module WebAdministration
           Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Sleep -Seconds 10   # allow IIS to warm up
+          Start-Sleep -Seconds 15   # give IIS some time to start
 
       # 9️⃣ Verify website with retry
       - name: Verify deployment
