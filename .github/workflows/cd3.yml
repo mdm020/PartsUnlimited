@@ -121,18 +121,34 @@ jobs:
         run: |
           Import-Module WebAdministration
           
-          # Stop app pool to release files
-          Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 3
+          # Create app pool if doesn't exist
+          if (-not (Test-Path "IIS:\AppPools\$env:IIS_APP_POOL_NAME")) {
+            New-WebAppPool -Name $env:IIS_APP_POOL_NAME
+            Write-Host "Created app pool"
+          }
+          
+          # Create website if doesn't exist
+          if (-not (Test-Path "IIS:\Sites\$env:IIS_SITE_NAME")) {
+            New-Item -Path "IIS:\Sites\$env:IIS_SITE_NAME" -Bindings @{protocol="http";bindingInformation="*:8080:"} -PhysicalPath $env:IIS_PHYSICAL_PATH
+            Set-ItemProperty "IIS:\Sites\$env:IIS_SITE_NAME" -Name applicationPool -Value $env:IIS_APP_POOL_NAME
+            Write-Host "Created website"
+          }
+          
+          # Stop app pool if running
+          $poolState = (Get-WebAppPoolState -Name $env:IIS_APP_POOL_NAME).Value
+          if ($poolState -ne "Stopped") {
+            Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
+            Start-Sleep -Seconds 3
+          }
           
           # Copy files to IIS directory
           Copy-Item -Path ".\artifacts\*" -Destination $env:IIS_PHYSICAL_PATH -Recurse -Force
           
-          # Start app pool
-          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME -ErrorAction SilentlyContinue
-          Start-Website -Name $env:IIS_SITE_NAME -ErrorAction SilentlyContinue
+          # Start app pool and website
+          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
+          Start-Website -Name $env:IIS_SITE_NAME
           
-          Write-Host "Deployed successfully"
+          Write-Host "Deployed successfully to http://localhost:8080"
         env:
           IIS_SITE_NAME: PartsUnlimited
           IIS_APP_POOL_NAME: PartsUnlimitedAppPool
