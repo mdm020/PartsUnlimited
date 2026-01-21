@@ -1,22 +1,11 @@
-name: CD - Deploy to IIS
+name: CD - Deploy to IIS (Manual)
 
-# Trigger manually or automatically after CI
 on:
-  workflow_run:
-    workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
-    types:
-      - completed
-  workflow_dispatch:  # allows manual run
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: self-hosted
-
-    # Only run on main/master or manual trigger
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'master'))
 
     env:
       IIS_APP_POOL_NAME: ${{ secrets.IIS_APP_POOL_NAME }}
@@ -24,36 +13,37 @@ jobs:
       IIS_SITE_URL: ${{ secrets.IIS_SITE_URL }}
 
     steps:
-      # 1️⃣ Checkout repo (needed for context)
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Download artifact from CI
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: partsunlimited-build   # <-- must match CI artifact name
-          path: artifact
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-      # 3️⃣ Fail gracefully if artifact missing
-      - name: Check artifact exists
-        shell: powershell
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build & Publish Website
         run: |
-          if (-not (Test-Path "artifact")) {
-              Write-Error "Artifact folder not found! Ensure CI workflow ran successfully."
-              exit 1
-          }
+          mkdir artifact
+          msbuild PartsUnlimited.sln `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=artifact `
+            /p:DeployTarget=WebPublish `
+            /p:OutDir=artifact\
 
-      # 4️⃣ Stop IIS App Pool
-      - name: Stop IIS Application Pool
+      - name: Stop IIS App Pool
         shell: powershell
         run: |
           Import-Module WebAdministration
-          Write-Host "Stopping App Pool: $env:IIS_APP_POOL_NAME"
           Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
-      # 5️⃣ Backup existing IIS site (optional)
       - name: Backup existing IIS site
         shell: powershell
         run: |
@@ -61,43 +51,24 @@ jobs:
           if (Test-Path $destination) {
               $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
               Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
-              Write-Host "Backup created at: $backupPath"
           }
 
-      # 6️⃣ Deploy artifact to IIS
       - name: Deploy to IIS
         shell: powershell
         run: |
-          $source = "artifact\*"
-          $destination = $env:IIS_SITE_PATH
-          Write-Host "Deploying from: $source"
-          Write-Host "Deploying to: $destination"
-          Copy-Item -Path $source -Destination $destination -Recurse -Force
-          Write-Host "✅ Deployment completed successfully"
+          Copy-Item -Path "artifact\*" -Destination $env:IIS_SITE_PATH -Recurse -Force
 
-      # 7️⃣ Start IIS App Pool
-      - name: Start IIS Application Pool
+      - name: Start IIS App Pool
         shell: powershell
         run: |
-          Import-Module WebAdministration
-          Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
-      # 8️⃣ Verify website is responding
-      - name: Verify deployment
+      - name: Verify Deployment
         shell: powershell
         run: |
-          $url = $env:IIS_SITE_URL
-          Write-Host "Checking website: $url"
           try {
-              $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
-              if ($response.StatusCode -eq 200) {
-                  Write-Host "✅ Website is responding successfully"
-              } else {
-                  Write-Warning "⚠️ Website returned status code: $($response.StatusCode)"
-              }
-          } catch {
-              Write-Error "❌ Website check failed: $_"
-              exit 1
-          }
+              $response = Invoke-WebRequest -Uri $env:IIS_SITE_URL -UseBasicParsing -TimeoutSec 30
+              if ($response.StatusCode -eq 200) { Write-Host "✅ Website is responding successfully" }
+              else { Write-Warning "⚠️ Website returned status code: $($response.StatusCode)" }
+          } catch { Write-Error "❌ Website check failed: $_"; exit 1 }
