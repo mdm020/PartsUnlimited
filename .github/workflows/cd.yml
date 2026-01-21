@@ -1,15 +1,16 @@
 name: CD - Deploy to IIS
 
 on:
+  workflow_dispatch:      # Manual trigger
   workflow_run:
-    workflows: [".NET Framework CI"]   # Replace with your CI workflow name
+    workflows: ["CI - Build and Test"]
     types:
       - completed
-  workflow_dispatch:
 
 jobs:
   deploy:
-    runs-on: self-hosted
+    runs-on: self-hosted   # Your Windows self-hosted runner
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
 
     env:
       IIS_APP_POOL_NAME: PartsUnlimitedAppPool
@@ -17,82 +18,96 @@ jobs:
       IIS_SITE_URL: http://localhost:8080/
 
     steps:
-      # 1️⃣ Checkout repository
-      - name: Checkout repository
+      # 1️⃣ Checkout code (needed for paths)
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 2️⃣ Setup NuGet
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
+      # 2️⃣ Download CI artifact
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: partsunlimited-build
+          path: artifact
 
-      - name: Restore packages
-        run: nuget restore PartsUnlimited.sln
-
-      # 3️⃣ Setup MSBuild
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      # 4️⃣ Build & Publish Website
-      - name: Build & Publish Website
+      # 3️⃣ Stop IIS App Pool
+      - name: Stop IIS App Pool
+        shell: pwsh
         run: |
-          $artifactPath = "$PWD\artifact"
-          mkdir $artifactPath -Force
-
-          msbuild PartsUnlimited.sln `
-            /p:Configuration=Release `
-            /p:Platform="Any CPU" `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=$artifactPath `
-            /p:DeployTarget=WebPublish
-
-          Write-Host "Published files:"
-          Get-ChildItem -Path $artifactPath -Recurse
-
-      # 5️⃣ Stop IIS App Pool
-      - name: Stop IIS Application Pool
-        shell: powershell
-        run: |
-          Import-Module WebAdministration
+          Import-Module WebAdministration -ErrorAction Stop
           Write-Host "Stopping App Pool: $env:IIS_APP_POOL_NAME"
           Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
-      # 6️⃣ Backup existing IIS site
+      # 4️⃣ Backup existing IIS site (optional)
       - name: Backup existing IIS site
-        shell: powershell
+        shell: pwsh
         run: |
-          $destination = $env:IIS_SITE_PATH
-          if (Test-Path $destination) {
-              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force -Verbose
-              Write-Host "Backup created at: $backupPath"
+          $dest = $env:IIS_SITE_PATH
+          if (Test-Path $dest) {
+              $backup = "$dest-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+              Copy-Item -Path $dest -Destination $backup -Recurse -Force
+              Write-Host "Backup created at: $backup"
           }
 
-      # 7️⃣ Deploy to IIS
-      - name: Deploy to IIS
-        shell: powershell
+      # 5️⃣ Deploy new files
+      - name: Deploy website
+        shell: pwsh
         run: |
-          $source = "$PWD\artifact\*"
+          $source = "artifact\**\*"
           $destination = $env:IIS_SITE_PATH
-          Write-Host "Deploying files from $source to $destination"
-          
-          if (-not (Test-Path $destination)) {
-              mkdir $destination
+          if (-not (Test-Path $destination)) { mkdir $destination }
+          Copy-Item -Path $source -Destination $destination -Recurse -Force
+          Write-Host "✅ Deployment completed"
+
+      # 6️⃣ Run EF6 Migrations
+      - name: Apply EF database migrations
+        shell: pwsh
+        run: |
+          $projectPath = "$PWD\src\PartsUnlimitedWebsite"
+          $toolsPath = Join-Path $projectPath "packages\EntityFramework.6.6.0\tools"
+
+          if (Test-Path "$toolsPath\Update-Database.exe") {
+              Write-Host "Applying EF6 migrations..."
+              & "$toolsPath\Update-Database.exe" -ProjectName PartsUnlimitedWebsite -StartUpProjectName PartsUnlimitedWebsite -Verbose
+              Write-Host "✅ Database updated"
+          } else {
+              Write-Warning "EF tools not found at $toolsPath. Skipping migrations."
           }
 
-          Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
-          Write-Host "✅ Deployment completed successfully"
-
-     
-
-      # 9️⃣ Start IIS App Pool
-      - name: Start IIS Application Pool
-        shell: powershell
+      # 7️⃣ Start IIS App Pool
+      - name: Start IIS App Pool
+        shell: pwsh
         run: |
-          Import-Module WebAdministration
+          Import-Module WebAdministration -ErrorAction Stop
           Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Sleep -Seconds 15   # give IIS some time to start
+          Start-Sleep -Seconds 10
 
-      
+      # 8️⃣ Verify website
+      - name: Verify deployment
+        shell: pwsh
+        run: |
+          $url = $env:IIS_SITE_URL
+          $maxRetries = 10
+          $delay = 5
+          $ok = $false
+
+          Write-Host "Checking website: $url"
+          for ($i=1; $i -le $maxRetries; $i++) {
+              try {
+                  $res = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
+                  if ($res.StatusCode -eq 200) {
+                      Write-Host "✅ Website is responding"
+                      $ok = $true
+                      break
+                  }
+              } catch {
+                  Write-Warning "Attempt $i: Website not reachable yet"
+              }
+              Start-Sleep -Seconds $delay
+          }
+
+          if (-not $ok) {
+              Write-Error "❌ Website verification failed"
+              exit 1
+          }
