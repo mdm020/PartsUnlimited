@@ -1,140 +1,87 @@
 name: CD - Deploy to IIS
 
+# Trigger manually or after CI workflow completes
 on:
   workflow_run:
-    workflows: ["CI - Build and Test"]
-    types: 
+    workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
+    types:
       - completed
-    branches: [main, master]
-  workflow_dispatch:
-    inputs: 
-      environment:
-        description: 'Environment to deploy to'
-        required: true
-        default: 'staging'
-        type: choice
-        options:
-          - staging
-          - production
+  workflow_dispatch:  # manual trigger
 
 jobs:
   deploy:
-    runs-on: windows-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
-    
-    environment: 
-      name: ${{ github. event.inputs.environment || 'staging' }}
-    
+    runs-on: self-hosted
+    if: >
+      github.event_name == 'workflow_dispatch' || 
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'master'))
+
     steps:
-    - name: Download build artifacts
-      uses:  actions/download-artifact@v4
-      with:
-        name: partsunlimited-build
-        path: ./artifacts
-        github-token: ${{ secrets. GITHUB_TOKEN }}
-        run-id: ${{ github.event.workflow_run.id }}
+      # 1️⃣ Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Display artifact structure
-      run: |
-        Write-Host "Artifact structure:"
-        Get-ChildItem -Path ./artifacts -Recurse | Select-Object FullName
+      # 2️⃣ Download artifact from CI
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
 
-    - name:  Prepare deployment package
-      run: |
-        # Find the web application binaries
-        $webAppPath = Get-ChildItem -Path ./artifacts -Recurse -Filter "PartsUnlimitedWebsite" -Directory | Select-Object -First 1
-        if ($webAppPath) {
-          Write-Host "Found web app at: $($webAppPath.FullName)"
-          Copy-Item -Path "$($webAppPath.FullName)\*" -Destination "./deploy" -Recurse -Force
-        } else {
-          # Fallback:  copy all binaries
-          New-Item -ItemType Directory -Path "./deploy" -Force
-          Copy-Item -Path "./artifacts/src/**/bin/Release/*" -Destination "./deploy" -Recurse -Force
-        }
-
-    - name: Stop IIS Application Pool
-      run: |
-        Import-Module WebAdministration
-        $appPoolName = "${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
-        if (Test-Path "IIS:\AppPools\$appPoolName") {
-          Stop-WebAppPool -Name $appPoolName
-          Write-Host "Stopped application pool: $appPoolName"
+      # 3️⃣ Stop IIS Application Pool
+      - name: Stop IIS Application Pool
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+          Write-Host "Stopping App Pool: $env:IIS_APP_POOL_NAME"
+          Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
-        } else {
-          Write-Host "Application pool does not exist, will be created"
-        }
 
-    - name: Deploy to IIS
-      run: |
-        Import-Module WebAdministration
-        
-        $siteName = "${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
-        $appPoolName = "${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
-        $physicalPath = "${{ vars.IIS_PHYSICAL_PATH || 'C:\inetpub\wwwroot\PartsUnlimited' }}"
-        $port = "${{ vars.IIS_PORT || '8080' }}"
-        
-        # Create application pool if it doesn't exist
-        if (-not (Test-Path "IIS:\AppPools\$appPoolName")) {
-          New-WebAppPool -Name $appPoolName
-          Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name managedRuntimeVersion -Value "v4.0"
-          Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name managedPipelineMode -Value "Integrated"
-          Write-Host "Created application pool: $appPoolName"
-        }
-        
-        # Create physical path if it doesn't exist
-        if (-not (Test-Path $physicalPath)) {
-          New-Item -ItemType Directory -Path $physicalPath -Force
-          Write-Host "Created physical path:  $physicalPath"
-        }
-        
-        # Copy deployment files
-        Write-Host "Copying files to:  $physicalPath"
-        Copy-Item -Path "./deploy/*" -Destination $physicalPath -Recurse -Force
-        
-        # Create or update IIS website
-        if (-not (Test-Path "IIS:\Sites\$siteName")) {
-          New-Website -Name $siteName -PhysicalPath $physicalPath -ApplicationPool $appPoolName -Port $port
-          Write-Host "Created website: $siteName on port $port"
-        } else {
-          Set-ItemProperty "IIS:\Sites\$siteName" -Name physicalPath -Value $physicalPath
-          Set-ItemProperty "IIS:\Sites\$siteName" -Name applicationPool -Value $appPoolName
-          Write-Host "Updated website: $siteName"
-        }
-
-    - name: Start IIS Application Pool
-      run:  |
-        Import-Module WebAdministration
-        $appPoolName = "${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
-        Start-WebAppPool -Name $appPoolName
-        Write-Host "Started application pool: $appPoolName"
-
-    - name:  Verify deployment
-      run: |
-        $siteName = "${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
-        $port = "${{ vars.IIS_PORT || '8080' }}"
-        
-        Start-Sleep -Seconds 10
-        
-        try {
-          $response = Invoke-WebRequest -Uri "http://localhost:$port" -UseBasicParsing -TimeoutSec 30
-          if ($response.StatusCode -eq 200) {
-            Write-Host "✅ Deployment successful!  Site is responding on port $port"
-          } else {
-            Write-Host "⚠️ Site returned status code: $($response.StatusCode)"
+      # 4️⃣ Backup existing IIS site (optional)
+      - name: Backup existing IIS site
+        shell: powershell
+        run: |
+          $destination = "${{ secrets.IIS_SITE_PATH }}"
+          if (Test-Path $destination) {
+              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
+              Write-Host "Backup created at: $backupPath"
           }
-        } catch {
-          Write-Host "⚠️ Warning: Could not verify deployment - $_"
-          Write-Host "Please check IIS manually"
-        }
 
-    - name: Deployment summary
-      run: |
-        Write-Host "======================================"
-        Write-Host "Deployment Summary"
-        Write-Host "======================================"
-        Write-Host "Environment: ${{ github.event.inputs.environment || 'staging' }}"
-        Write-Host "Site Name: ${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
-        Write-Host "App Pool:  ${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
-        Write-Host "Physical Path: ${{ vars. IIS_PHYSICAL_PATH || 'C:\inetpub\wwwroot\PartsUnlimited' }}"
-        Write-Host "Port: ${{ vars.IIS_PORT || '8080' }}"
-        Write-Host "======================================"
+      # 5️⃣ Deploy artifact to IIS
+      - name: Deploy to IIS
+        shell: powershell
+        run: |
+          $source = "artifact\*"
+          $destination = "${{ secrets.IIS_SITE_PATH }}"
+          Write-Host "Deploying from: $source"
+          Write-Host "Deploying to: $destination"
+          Copy-Item -Path $source -Destination $destination -Recurse -Force
+          Write-Host "✅ Deployment completed successfully"
+
+      # 6️⃣ Start IIS Application Pool
+      - name: Start IIS Application Pool
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
+          Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
+          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
+          Start-Sleep -Seconds 5
+
+      # 7️⃣ Verify website is responding
+      - name: Verify deployment
+        shell: powershell
+        run: |
+          $url = "${{ secrets.IIS_SITE_URL }}"
+          Write-Host "Checking website: $url"
+          try {
+              $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Website is responding successfully"
+              } else {
+                  Write-Warning "⚠️ Website returned status code: $($response.StatusCode)"
+              }
+          } catch {
+              Write-Error "❌ Website check failed: $_"
+              exit 1
+          }
