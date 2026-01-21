@@ -17,15 +17,11 @@ jobs:
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
-      - name: Restore NuGet packages (packages.config)
+      - name: Restore NuGet packages
         run: nuget restore PartsUnlimited.sln
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
       - name: Build solution
-        run: |
-          msbuild PartsUnlimited.sln ^
-            /p:Configuration=Release ^
-            /p:Platform="Any CPU" ^
-            /m
+        run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /m
