@@ -117,6 +117,7 @@ jobs:
       
       # Deploy to IIS
       - name: Deploy to IIS
+        shell: powershell
         run: |
           Write-Host "========================================" -ForegroundColor Cyan
           Write-Host "IIS Deployment Script" -ForegroundColor Cyan
@@ -136,7 +137,7 @@ jobs:
           $Port = [int]$env:IIS_PORT
           
           # Import IIS module
-          Import-Module WebAdministration -ErrorAction Stop -SkipEditionCheck
+          Import-Module WebAdministration -ErrorAction Stop
           
           # Verify artifact path exists
           if (-not (Test-Path $ArtifactPath)) {
@@ -222,13 +223,9 @@ jobs:
             Write-Host "Website created successfully" -ForegroundColor Green
           } else {
             Write-Host "Website already exists, updating configuration" -ForegroundColor Yellow
-            Set-ItemProperty "IIS:\Sites\$SiteName" -Name physicalPath -Value $PhysicalPath -ErrorAction SilentlyContinue
-            Set-ItemProperty "IIS:\Sites\$SiteName" -Name applicationPool -Value $AppPoolName -ErrorAction SilentlyContinue
-            
-            # Use appcmd as fallback if Set-ItemProperty fails
+            # Use appcmd to update site configuration
             & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set site $SiteName /[path='/'].physicalPath:$PhysicalPath
-            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set app "$SiteName/" /applicationPool:ysicalPath
-            Set-ItemProperty "IIS:\Sites\$SiteName" -Name applicationPool -Value $AppPoolName
+            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set app "$SiteName/" /applicationPool:$AppPoolName
             
             # Update binding if needed
             $binding = Get-WebBinding -Name $SiteName -Port $Port -Protocol "http"
@@ -281,6 +278,7 @@ jobs:
       
       # Verify deployment
       - name: Verify deployment
+        shell: powershell
         run: |
           Write-Host "========================================" -ForegroundColor Cyan
           Write-Host "Verifying Deployment" -ForegroundColor Cyan
