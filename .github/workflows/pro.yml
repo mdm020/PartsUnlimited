@@ -1,0 +1,201 @@
+deploy:
+  name: Deploy to IIS
+  needs: build
+  runs-on: self-hosted
+  if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+
+  steps:
+  - name: Download build artifacts
+    uses: actions/download-artifact@v4
+    with:
+      name: partsunlimited-build
+      path: C:\temp\PartsUnlimited\artifacts
+
+  - name: Stop IIS Application Pool (safe)
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+
+      $appPoolName   = "PartsUnlimitedAppPool"
+      $sitePath      = "C:\inetpub\wwwroot\PartsUnlimited"
+      $port          = 8080
+
+      if (Test-Path "IIS:\AppPools\$appPoolName") {
+        $state = (Get-WebAppPoolState -Name $appPoolName).Value
+        if ($state -ne 'Stopped') {
+          Write-Host "Stopping app pool $appPoolName (current state: $state)..."
+          Stop-WebAppPool -Name $appPoolName
+          Start-Sleep -Seconds 5
+        } else {
+          Write-Host "App pool $appPoolName already stopped; continuing."
+        }
+      } else {
+        Write-Host "App pool $appPoolName does not exist yet; it will be created later."
+      }
+
+  - name: Backup current deployment
+    shell: powershell
+    run: |
+      $deployPath = "C:\inetpub\wwwroot\PartsUnlimited"
+      $backupRoot = "C:\inetpub\wwwroot"
+      $timestamp  = Get-Date -Format 'yyyyMMdd_HHmmss'
+      $backupPath = Join-Path $backupRoot ("PartsUnlimited_backup_{0}" -f $timestamp)
+
+      if (Test-Path $deployPath) {
+        Copy-Item -Path $deployPath -Destination $backupPath -Recurse -Force
+        Write-Host "Backup created at: $backupPath"
+
+        Get-ChildItem -Path $backupRoot -Filter "PartsUnlimited_backup_*" -Directory |
+          Sort-Object CreationTime -Descending |
+          Select-Object -Skip 5 |
+          Remove-Item -Recurse -Force
+      } else {
+        Write-Host "No existing deployment found to back up."
+      }
+
+  - name: Clear deployment directory
+    shell: powershell
+    run: |
+      $deployPath = "C:\inetpub\wwwroot\PartsUnlimited"
+
+      if (Test-Path $deployPath) {
+        Get-ChildItem -Path $deployPath -Recurse | Remove-Item -Force -Recurse
+        Write-Host "Deployment directory cleared"
+      } else {
+        New-Item -ItemType Directory -Path $deployPath -Force | Out-Null
+        Write-Host "Deployment directory created"
+      }
+
+  - name: Copy files to IIS
+    shell: powershell
+    run: |
+      $sourcePath = "C:\temp\PartsUnlimited\artifacts"
+      $deployPath = "C:\inetpub\wwwroot\PartsUnlimited"
+
+      Copy-Item -Path "$sourcePath\*" -Destination $deployPath -Recurse -Force
+      Write-Host "Files copied to deployment directory"
+
+  - name: Configure IIS Application Pool
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+
+      $appPoolName = "PartsUnlimitedAppPool"
+
+      if (-not (Test-Path "IIS:\AppPools\$appPoolName")) {
+        New-WebAppPool -Name $appPoolName
+        Write-Host "Application pool created"
+      }
+
+      Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "managedRuntimeVersion" -Value "v4.0"
+      Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "managedPipelineMode"  -Value "Integrated"
+      Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "enable32BitAppOnWin64" -Value $false
+      Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "processModel.identityType" -Value "ApplicationPoolIdentity"
+
+      Write-Host "Application pool configured"
+
+  - name: Configure IIS Website
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+
+      $siteName   = "MyDotNetApp"
+      $appPool    = "PartsUnlimitedAppPool"
+      $physical   = "C:\inetpub\wwwroot\PartsUnlimited"
+      $port       = 8080
+
+      if (-not (Test-Path "IIS:\Sites\$siteName")) {
+        New-Website -Name $siteName `
+          -PhysicalPath $physical `
+          -ApplicationPool $appPool `
+          -Port $port
+        Write-Host "Website created"
+      } else {
+        Set-ItemProperty "IIS:\Sites\$siteName" -Name "physicalPath"    -Value $physical
+        Set-ItemProperty "IIS:\Sites\$siteName" -Name "applicationPool" -Value $appPool
+
+        $binding = Get-WebBinding -Name $siteName -Port $port -ErrorAction SilentlyContinue
+        if ($null -eq $binding) {
+          New-WebBinding -Name $siteName -Protocol "http" -Port $port -IPAddress "*"
+        }
+
+        Write-Host "Website updated"
+      }
+
+  - name: Set folder permissions
+    shell: powershell
+    run: |
+      $deployPath  = "C:\inetpub\wwwroot\PartsUnlimited"
+      $appPoolName = "PartsUnlimitedAppPool"
+
+      $acl = Get-Acl $deployPath
+      $permission = "IIS AppPool\$appPoolName","ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow"
+      $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule $permission
+      $acl.SetAccessRule($accessRule)
+      Set-Acl $deployPath $acl
+      Write-Host "Permissions set for application pool identity"
+
+  - name: Start IIS Application Pool
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+
+      $appPoolName = "PartsUnlimitedAppPool"
+
+      if (Test-Path "IIS:\AppPools\$appPoolName") {
+        $state = (Get-WebAppPoolState -Name $appPoolName).Value
+        if ($state -ne 'Started') {
+          Start-WebAppPool -Name $appPoolName
+        }
+      }
+
+      $count = 0
+      while ((Get-WebAppPoolState -Name $appPoolName).Value -ne "Started" -and $count -lt 30) {
+        Start-Sleep -Seconds 1
+        $count++
+      }
+      Write-Host "Application pool started"
+
+  - name: Start IIS Website
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+
+      $siteName = "MyDotNetApp"
+
+      Start-Website -Name $siteName
+
+      Write-Host "Website started"
+
+  - name: Warm up application
+    shell: powershell
+    run: |
+      Start-Sleep -Seconds 5
+      try {
+        $response = Invoke-WebRequest -Uri "http://localhost:8080" -UseBasicParsing -TimeoutSec 30
+        Write-Host "Application warmed up. Status: $($response.StatusCode)"
+      } catch {
+        Write-Warning "Failed to warm up application: $_"
+      }
+
+  - name: Verify deployment
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+
+      $appPoolName = "PartsUnlimitedAppPool"
+      $siteName    = "MyDotNetApp"
+
+      $appPoolState = (Get-WebAppPoolState -Name $appPoolName).Value
+      $websiteState = (Get-Website -Name $siteName).State
+
+      Write-Host "Application Pool State: $appPoolState"
+      Write-Host "Website State: $websiteState"
+
+      if ($appPoolState -eq "Started" -and $websiteState -eq "Started") {
+        Write-Host "✓ Deployment successful!"
+        Write-Host "Application URL: http://localhost:8080"
+      } else {
+        Write-Error "Deployment verification failed!"
+        exit 1
+      }
