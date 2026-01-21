@@ -1,0 +1,167 @@
+name: CI - Build, Test & Security Scan
+
+on:
+  push: 
+    branches: [ main, master, develop ]
+  pull_request: 
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  SOLUTION_FILE: PartsUnlimited.sln
+  BUILD_CONFIGURATION: Release
+  WEB_PROJECT_PATH: src/PartsUnlimitedWebsite
+
+jobs:
+  build-and-scan:
+    runs-on: windows-latest
+    
+    steps: 
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Full history for better SAST analysis
+
+    - name:  Setup NuGet
+      uses: NuGet/setup-nuget@v1
+      with:
+        nuget-version: 'latest'
+
+    - name:  Restore NuGet packages
+      run: nuget restore ${{ env.SOLUTION_FILE }}
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Build solution
+      run: |
+        Write-Host "🔨 Building solution in ${{ env.BUILD_CONFIGURATION }} mode..."
+        msbuild ${{ env.SOLUTION_FILE }} `
+          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
+          /p:Platform="Any CPU" `
+          /p:DeployOnBuild=true `
+          /p:WebPublishMethod=FileSystem `
+          /p:PublishUrl="${{ github.workspace }}\publish" `
+          /p:DeleteExistingFiles=true `
+          /m `
+          /v:minimal
+        Write-Host "✅ Build completed successfully"
+
+    - name: Run Unit Tests
+      run: |
+        Write-Host "🧪 Running unit tests..."
+        
+        # Locate vstest.console.exe
+        $vsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vsWhere) {
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Workload.ManagedDesktop -property installationPath
+          if ($vsPath) {
+            $vstest = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe'
+            if (Test-Path $vstest) {
+              Write-Host "Found vstest at: $vstest"
+              
+              # Find all test assemblies
+              $testDlls = Get-ChildItem -Path .  -Recurse -Filter '*Tests. dll' | 
+                          Where-Object { $_. FullName -like "*\bin\${{ env.BUILD_CONFIGURATION }}\*" -and $_. FullName -notlike "*\ref\*" }
+              
+              if ($testDlls) {
+                foreach ($dll in $testDlls) {
+                  Write-Host "Running tests in:  $($dll.Name)"
+                  & $vstest $dll.FullName --logger:"console;verbosity=normal"
+                }
+                Write-Host "✅ Tests completed successfully"
+              } else {
+                Write-Host "⚠️ No test assemblies found"
+              }
+            }
+          }
+        } else {
+          Write-Host "⚠️ vstest.console.exe not found, skipping tests"
+        }
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages:  csharp
+        queries: security-and-quality
+
+    - name:  Perform CodeQL Analysis (SAST)
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:csharp"
+
+    - name: Run Security DevOps Analysis
+      uses: microsoft/security-devops-action@latest
+      id: msdo
+      continue-on-error: true
+      with:
+        tools: 'credscan,binskim'
+
+    - name: Upload MSDO Results to Security tab
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: ${{ steps.msdo.outputs.sarifFile }}
+
+    - name: Verify publish output
+      run: |
+        Write-Host "📦 Verifying published files..."
+        if (Test-Path "${{ github.workspace }}\publish") {
+          $files = Get-ChildItem -Path "${{ github.workspace }}\publish" -Recurse
+          Write-Host "Found $($files. Count) files in publish directory"
+          Write-Host "`nPublish directory structure:"
+          Get-ChildItem -Path "${{ github.workspace }}\publish" -Recurse -Depth 2 | 
+            Select-Object FullName -First 20
+        } else {
+          Write-Host "❌ Publish directory not found!"
+          exit 1
+        }
+
+    - name: Prepare deployment artifact
+      run: |
+        Write-Host "📦 Preparing deployment package..."
+        
+        $publishPath = "${{ github.workspace }}\publish"
+        $artifactPath = "${{ github.workspace }}\deployment-package"
+        
+        # Create artifact directory
+        New-Item -ItemType Directory -Path $artifactPath -Force | Out-Null
+        
+        # Copy published files
+        Copy-Item -Path "$publishPath\*" -Destination $artifactPath -Recurse -Force
+        
+        # Create version file for tracking
+        $versionInfo = @{
+          BuildNumber = "${{ github.run_number }}"
+          CommitSHA = "${{ github.sha }}"
+          CommitMessage = "${{ github.event.head_commit.message }}"
+          BuildDate = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+          Branch = "${{ github.ref_name }}"
+        } | ConvertTo-Json
+        
+        $versionInfo | Out-File -FilePath "$artifactPath\deployment-info.json" -Encoding UTF8
+        
+        Write-Host "✅ Deployment package prepared"
+        Write-Host "`nPackage contents:"
+        Get-ChildItem -Path $artifactPath -Recurse -Depth 1 | Select-Object Name, Length
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with: 
+        name: partsunlimited-build-${{ github.run_number }}
+        path: ${{ github. workspace }}\deployment-package
+        retention-days: 30
+        if-no-files-found: error
+
+    - name: Build Summary
+      if: always()
+      run: |
+        Write-Host "`n======================================"
+        Write-Host "📋 Build Summary"
+        Write-Host "======================================"
+        Write-Host "Build Number: ${{ github.run_number }}"
+        Write-Host "Commit:  ${{ github.sha }}"
+        Write-Host "Branch: ${{ github.ref_name }}"
+        Write-Host "Triggered by: ${{ github.actor }}"
+        Write-Host "Configuration: ${{ env.BUILD_CONFIGURATION }}"
+        Write-Host "======================================"
