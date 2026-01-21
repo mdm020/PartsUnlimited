@@ -21,13 +21,12 @@ jobs:
     - name: Restore NuGet Packages
       run: nuget restore PartsUnlimited.sln
 
-    - name: Build Solution
-      run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:DeployOnBuild=false
+    - name: Build and Publish
+      run: msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=..\..\publish /p:DeleteExistingFiles=true
 
     - name: Run Unit Tests
       run: |
         # Assuming vstest.console.exe is in PATH or added by setup-msbuild/VS installation
-        # If not, you might need to specify the full path to vstest.console.exe
         vstest.console.exe test\PartsUnlimited.UnitTests\bin\Release\PartsUnlimited.UnitTests.dll
 
     - name: Deploy to IIS
@@ -39,6 +38,7 @@ jobs:
         $websiteName = "PartsUnlimited"
         $websitePath = "C:\inetpub\wwwroot\PartsUnlimited"
         $websitePort = 8080
+        $publishPath = "publish"
 
         # Ensure App Pool exists
         if (!(Test-Path "IIS:\AppPools\$appPoolName")) {
@@ -70,9 +70,9 @@ jobs:
         Start-Sleep -Seconds 5
 
         try {
-            # Publish using MSBuild
-            Write-Host "Publishing application..."
-            msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=$websitePath /p:DeleteExistingFiles=false
+            # Copy artifacts
+            Write-Host "Copying artifacts from $publishPath to $websitePath..."
+            Copy-Item -Path "$publishPath\*" -Destination $websitePath -Recurse -Force
         }
         finally {
             # Start App Pool
