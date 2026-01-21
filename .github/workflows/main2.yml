@@ -57,9 +57,14 @@ jobs:
             New-Website -Name $websiteName -PhysicalPath $websitePath -Port $websitePort -ApplicationPool $appPoolName
         }
 
-        # Stop App Pool
-        Write-Host "Stopping App Pool..."
-        Stop-WebAppPool -Name $appPoolName
+        # Stop App Pool if it is running
+        $pool = Get-WebAppPool -Name $appPoolName
+        if ($pool.State -eq "Started") {
+            Write-Host "Stopping App Pool..."
+            Stop-WebAppPool -Name $appPoolName
+        } else {
+            Write-Host "App Pool is already stopped."
+        }
         
         # Wait a bit for the process to release files
         Start-Sleep -Seconds 5
