@@ -12,9 +12,9 @@ jobs:
     runs-on: self-hosted
 
     env:
-      IIS_APP_POOL_NAME: ${{ secrets.IIS_APP_POOL_NAME }}
-      IIS_SITE_PATH: ${{ secrets.IIS_SITE_PATH }}
-      IIS_SITE_URL: ${{ secrets.IIS_SITE_URL }}
+      IIS_APP_POOL_NAME: PartsUnlimitedAppPool
+      IIS_SITE_PATH: C:\inetpub\wwwroot\PartsUnlimited
+      IIS_SITE_URL: http://localhost:8080/PartsUnlimited
 
     steps:
       # 1️⃣ Checkout repository
@@ -85,7 +85,7 @@ jobs:
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 10   # allow IIS to warm up
 
-      # 9️⃣ Verify website with retry (fixed PowerShell interpolation)
+      # 9️⃣ Verify website with retry (hardcoded URL)
       - name: Verify deployment
         shell: powershell
         run: |
