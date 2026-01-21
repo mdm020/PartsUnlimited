@@ -1,0 +1,54 @@
+name: CI Build and Test
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+        
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+      
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
+      
+    - name: Restore NuGet packages
+      run: nuget restore PartsUnlimited.sln
+      
+    - name: Build solution
+      run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /m
+      
+    - name: Run Unit Tests
+      run: |
+        dotnet test test/PartsUnlimited.UnitTests/PartsUnlimited.UnitTests.csproj --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+      continue-on-error: true
+      
+    - name: Publish Test Results
+      uses: dorny/test-reporter@v1
+      if: always()
+      with:
+        name: Unit Test Results
+        path: '**/test-results.trx'
+        reporter: dotnet-trx
+        fail-on-error: false
+        
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-artifacts
+        path: |
+          src/**/bin/Release/
+          !src/**/bin/Release/**/*.pdb
