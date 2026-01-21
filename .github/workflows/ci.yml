@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [ main, master, develop ]
 
+permissions:
+  checks: write
+  pull-requests: write
+  contents: read
+
 jobs:
   build:
     runs-on: windows-2022
