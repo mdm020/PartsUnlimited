@@ -5,7 +5,7 @@ on:
     workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
     types:
       - completed
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:  # allows manual trigger
 
 jobs:
   deploy:
@@ -85,7 +85,7 @@ jobs:
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 10   # allow IIS to warm up
 
-      # 9️⃣ Verify website with retry
+      # 9️⃣ Verify website with retry (fixed PowerShell interpolation)
       - name: Verify deployment
         shell: powershell
         run: |
@@ -100,19 +100,19 @@ jobs:
               try {
                   $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
                   if ($response.StatusCode -eq 200) {
-                      Write-Host "✅ Website is responding successfully"
+                      Write-Host "Website is responding successfully ✅"
                       $success = $true
                       break
                   } else {
-                      Write-Warning "⚠️ Attempt $i: Status code $($response.StatusCode)"
+                      Write-Warning "Attempt ${i}: Website returned status code $($response.StatusCode)"
                   }
               } catch {
-                  Write-Warning "⚠️ Attempt $i: Website not reachable yet"
+                  Write-Warning "Attempt ${i}: Website not reachable yet"
               }
               Start-Sleep -Seconds $delaySeconds
           }
 
           if (-not $success) {
-              Write-Error "❌ Website verification failed after $maxRetries attempts"
+              Write-Error "Website verification failed after $maxRetries attempts ❌"
               exit 1
           }
