@@ -84,14 +84,7 @@ jobs:
           Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
           Write-Host "✅ Deployment completed successfully"
 
-      # 8️⃣ Start IIS App Pool
-      - name: Start IIS Application Pool
-        shell: powershell
-        run: |
-          Import-Module WebAdministration
-          Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
-          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Sleep -Seconds 15   # give IIS some time to start
+     
 
       # 9️⃣ Verify website with retry
       - name: Verify deployment
