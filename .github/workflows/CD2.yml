@@ -136,7 +136,7 @@ jobs:
           $Port = [int]$env:IIS_PORT
           
           # Import IIS module
-          Import-Module WebAdministration -ErrorAction Stop
+          Import-Module WebAdministration -ErrorAction Stop -SkipEditionCheck
           
           # Verify artifact path exists
           if (-not (Test-Path $ArtifactPath)) {
@@ -151,19 +151,21 @@ jobs:
           }
           
           # Create Application Pool if it doesn't exist
-          if (-not (Test-Path "IIS:\AppPools\$AppPoolName")) {
+          $existingAppPool = Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue
+          if (-not $existingAppPool) {
             Write-Host "Creating Application Pool: $AppPoolName" -ForegroundColor Yellow
             New-WebAppPool -Name $AppPoolName -Force
-            Set-ItemProperty "IIS:\AppPools\$AppPoolName" -Name managedRuntimeVersion -Value "v4.0"
-            Set-ItemProperty "IIS:\AppPools\$AppPoolName" -Name enable32BitAppOnWin64 -Value $false
+            # Configure app pool using appcmd as IIS: drive may not be available
+            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set apppool $AppPoolName /managedRuntimeVersion:v4.0
+            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set apppool $AppPoolName /enable32BitAppOnWin64:false
           } else {
             Write-Host "Application Pool already exists: $AppPoolName" -ForegroundColor Green
           }
           
           # Stop Application Pool
           Write-Host "Stopping Application Pool: $AppPoolName" -ForegroundColor Yellow
-          $appPool = Get-Item "IIS:\AppPools\$AppPoolName"
-          if ($appPool.State -ne "Stopped") {
+          $appPoolState = Get-WebAppPoolState -Name $AppPoolName
+          if ($appPoolState.Value -ne "Stopped") {
             Stop-WebAppPool -Name $AppPoolName
             
             # Wait for app pool to stop
@@ -182,7 +184,8 @@ jobs:
           }
           
           # Stop Website if it exists
-          if (Test-Path "IIS:\Sites\$SiteName") {
+          $existingSite = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
+          if ($existingSite) {
             Write-Host "Stopping Website: $SiteName" -ForegroundColor Yellow
             Stop-Website -Name $SiteName -ErrorAction SilentlyContinue
           }
@@ -212,14 +215,19 @@ jobs:
             exit 1
           }
           
-          # Create or update Website
-          if (-not (Test-Path "IIS:\Sites\$SiteName")) {
+          $existingSite = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
+          if (-not $existingSite) {
             Write-Host "Creating Website: $SiteName" -ForegroundColor Yellow
             New-Website -Name $SiteName -PhysicalPath $PhysicalPath -ApplicationPool $AppPoolName -Port $Port -Force
             Write-Host "Website created successfully" -ForegroundColor Green
           } else {
             Write-Host "Website already exists, updating configuration" -ForegroundColor Yellow
-            Set-ItemProperty "IIS:\Sites\$SiteName" -Name physicalPath -Value $PhysicalPath
+            Set-ItemProperty "IIS:\Sites\$SiteName" -Name physicalPath -Value $PhysicalPath -ErrorAction SilentlyContinue
+            Set-ItemProperty "IIS:\Sites\$SiteName" -Name applicationPool -Value $AppPoolName -ErrorAction SilentlyContinue
+            
+            # Use appcmd as fallback if Set-ItemProperty fails
+            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set site $SiteName /[path='/'].physicalPath:$PhysicalPath
+            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set app "$SiteName/" /applicationPool:ysicalPath
             Set-ItemProperty "IIS:\Sites\$SiteName" -Name applicationPool -Value $AppPoolName
             
             # Update binding if needed
