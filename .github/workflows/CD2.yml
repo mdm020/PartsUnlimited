@@ -91,7 +91,7 @@ jobs:
 
   deploy:
     needs: build-test-artifact
-    runs-on: windows-latest
+    runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
@@ -119,192 +119,47 @@ jobs:
       - name: Deploy to IIS
         shell: powershell
         run: |
-          Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "IIS Deployment Script" -ForegroundColor Cyan
-          Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "Site Name: $env:IIS_SITE_NAME"
-          Write-Host "App Pool: $env:IIS_APP_POOL_NAME"
-          Write-Host "Physical Path: $env:IIS_PHYSICAL_PATH"
-          Write-Host "Port: $env:IIS_PORT"
-          Write-Host "Artifact Path: .\artifacts"
-          Write-Host ""
+          Import-Module WebAdministration
           
-          # Set variables
-          $ArtifactPath = ".\artifacts"
-          $SiteName = $env:IIS_SITE_NAME
-          $AppPoolName = $env:IIS_APP_POOL_NAME
-          $PhysicalPath = $env:IIS_PHYSICAL_PATH
-          $Port = [int]$env:IIS_PORT
-          
-          # Import IIS module
-          Import-Module WebAdministration -ErrorAction Stop
-          
-          # Verify artifact path exists
-          if (-not (Test-Path $ArtifactPath)) {
-            Write-Error "Artifact path does not exist: $ArtifactPath"
-            exit 1
+          # Create app pool if doesn't exist
+          if (-not (Test-Path "IIS:\AppPools\$env:IIS_APP_POOL_NAME")) {
+            New-WebAppPool -Name $env:IIS_APP_POOL_NAME
+            Write-Host "Created app pool"
           }
           
-          # Create physical path if it doesn't exist
-          if (-not (Test-Path $PhysicalPath)) {
-            Write-Host "Creating physical path: $PhysicalPath" -ForegroundColor Yellow
-            New-Item -Path $PhysicalPath -ItemType Directory -Force | Out-Null
+          # Create website if doesn't exist
+          if (-not (Test-Path "IIS:\Sites\$env:IIS_SITE_NAME")) {
+            New-Item -Path "IIS:\Sites\$env:IIS_SITE_NAME" -Bindings @{protocol="http";bindingInformation="*:8080:"} -PhysicalPath $env:IIS_PHYSICAL_PATH
+            Set-ItemProperty "IIS:\Sites\$env:IIS_SITE_NAME" -Name applicationPool -Value $env:IIS_APP_POOL_NAME
+            Write-Host "Created website"
           }
           
-          # Create Application Pool if it doesn't exist
-          $existingAppPool = Get-WebAppPoolState -Name $AppPoolName -ErrorAction SilentlyContinue
-          if (-not $existingAppPool) {
-            Write-Host "Creating Application Pool: $AppPoolName" -ForegroundColor Yellow
-            New-WebAppPool -Name $AppPoolName -Force
-            # Configure app pool using appcmd as IIS: drive may not be available
-            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set apppool $AppPoolName /managedRuntimeVersion:v4.0
-            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set apppool $AppPoolName /enable32BitAppOnWin64:false
-          } else {
-            Write-Host "Application Pool already exists: $AppPoolName" -ForegroundColor Green
-          }
+          # Stop app pool to release files
+          Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 3
           
-          # Stop Application Pool
-          Write-Host "Stopping Application Pool: $AppPoolName" -ForegroundColor Yellow
-          $appPoolState = Get-WebAppPoolState -Name $AppPoolName
-          if ($appPoolState.Value -ne "Stopped") {
-            Stop-WebAppPool -Name $AppPoolName
-            
-            # Wait for app pool to stop
-            $timeout = 30
-            $elapsed = 0
-            while ((Get-WebAppPoolState -Name $AppPoolName).Value -ne "Stopped" -and $elapsed -lt $timeout) {
-              Start-Sleep -Seconds 1
-              $elapsed++
-            }
-            
-            if ($elapsed -ge $timeout) {
-              Write-Warning "Application Pool did not stop within timeout period"
-            } else {
-              Write-Host "Application Pool stopped successfully" -ForegroundColor Green
-            }
-          }
+          # Copy files to IIS directory
+          Copy-Item -Path ".\artifacts\*" -Destination $env:IIS_PHYSICAL_PATH -Recurse -Force
           
-          # Stop Website if it exists
-          $existingSite = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
-          if ($existingSite) {
-            Write-Host "Stopping Website: $SiteName" -ForegroundColor Yellow
-            Stop-Website -Name $SiteName -ErrorAction SilentlyContinue
-          }
+          # Start app pool and website
+          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
+          Start-Website -Name $env:IIS_SITE_NAME
           
-          # Copy artifacts to physical path
-          Write-Host "Copying artifacts from $ArtifactPath to $PhysicalPath" -ForegroundColor Yellow
-          try {
-            # Remove old files (keep web.config backup if exists)
-            if (Test-Path "$PhysicalPath\*") {
-              # Backup Web.config if it exists
-              if (Test-Path "$PhysicalPath\Web.config") {
-                Copy-Item "$PhysicalPath\Web.config" "$PhysicalPath\Web.config.backup" -Force
-                Write-Host "Backed up Web.config" -ForegroundColor Green
-              }
-              
-              # Remove all files except backup
-              Get-ChildItem -Path $PhysicalPath -Recurse | 
-                Where-Object { $_.Name -ne "Web.config.backup" } | 
-                Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-            }
-            
-            # Copy new artifacts
-            Copy-Item -Path "$ArtifactPath\*" -Destination $PhysicalPath -Recurse -Force
-            Write-Host "Artifacts copied successfully" -ForegroundColor Green
-          } catch {
-            Write-Error "Failed to copy artifacts: $_"
-            exit 1
-          }
-          
-          $existingSite = Get-Website -Name $SiteName -ErrorAction SilentlyContinue
-          if (-not $existingSite) {
-            Write-Host "Creating Website: $SiteName" -ForegroundColor Yellow
-            New-Website -Name $SiteName -PhysicalPath $PhysicalPath -ApplicationPool $AppPoolName -Port $Port -Force
-            Write-Host "Website created successfully" -ForegroundColor Green
-          } else {
-            Write-Host "Website already exists, updating configuration" -ForegroundColor Yellow
-            # Use appcmd to update site configuration
-            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set site $SiteName /[path='/'].physicalPath:$PhysicalPath
-            & "$env:SystemRoot\system32\inetsrv\appcmd.exe" set app "$SiteName/" /applicationPool:$AppPoolName
-            
-            # Update binding if needed
-            $binding = Get-WebBinding -Name $SiteName -Port $Port -Protocol "http"
-            if (-not $binding) {
-              Remove-WebBinding -Name $SiteName -Protocol "http" -ErrorAction SilentlyContinue
-              New-WebBinding -Name $SiteName -Protocol "http" -Port $Port -IPAddress "*"
-            }
-          }
-          
-          # Start Application Pool
-          Write-Host "Starting Application Pool: $AppPoolName" -ForegroundColor Yellow
-          Start-WebAppPool -Name $AppPoolName
-          
-          # Wait for app pool to start
-          $timeout = 30
-          $elapsed = 0
-          while ((Get-WebAppPoolState -Name $AppPoolName).Value -ne "Started" -and $elapsed -lt $timeout) {
-            Start-Sleep -Seconds 1
-            $elapsed++
-          }
-          
-          if ((Get-WebAppPoolState -Name $AppPoolName).Value -eq "Started") {
-            Write-Host "Application Pool started successfully" -ForegroundColor Green
-          } else {
-            Write-Warning "Application Pool did not start within timeout period"
-          }
-          
-          # Start Website
-          Write-Host "Starting Website: $SiteName" -ForegroundColor Yellow
-          Start-Website -Name $SiteName
-          
-          # Verify website is running
-          $siteState = (Get-Website -Name $SiteName).State
-          if ($siteState -eq "Started") {
-            Write-Host "Website started successfully" -ForegroundColor Green
-          } else {
-            Write-Warning "Website state: $siteState"
-          }
-          
-          Write-Host ""
-          Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "Deployment completed!" -ForegroundColor Green
-          Write-Host "Website URL: http://localhost:$Port" -ForegroundColor Cyan
-          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "Deployed successfully to http://localhost:8080"
         env:
           IIS_SITE_NAME: PartsUnlimited
           IIS_APP_POOL_NAME: PartsUnlimitedAppPool
           IIS_PHYSICAL_PATH: C:\inetpub\wwwroot\PartsUnlimited
-          IIS_PORT: 8080
       
       # Verify deployment
       - name: Verify deployment
         shell: powershell
         run: |
-          Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "Verifying Deployment" -ForegroundColor Cyan
-          Write-Host "========================================" -ForegroundColor Cyan
-          
           Import-Module WebAdministration
-          
-          # Check App Pool status
-          $appPool = Get-WebAppPoolState -Name $env:IIS_APP_POOL_NAME
-          Write-Host "App Pool Status: $($appPool.Value)" -ForegroundColor $(if($appPool.Value -eq 'Started'){'Green'}else{'Red'})
-          
-          # Check Website status
+          $status = Get-WebAppPoolState -Name $env:IIS_APP_POOL_NAME
+          Write-Host "App Pool: $($status.Value)"
           $site = Get-Website -Name $env:IIS_SITE_NAME
-          Write-Host "Website Status: $($site.State)" -ForegroundColor $(if($site.State -eq 'Started'){'Green'}else{'Red'})
-          
-          # Check if physical path exists and has files
-          $fileCount = (Get-ChildItem -Path $env:IIS_PHYSICAL_PATH -File).Count
-          Write-Host "Files deployed: $fileCount" -ForegroundColor Green
-          
-          Write-Host ""
-          Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "Deployment Complete!" -ForegroundColor Green
-          Write-Host "Website URL: http://localhost:$env:IIS_PORT" -ForegroundColor Cyan
-          Write-Host "========================================" -ForegroundColor Cyan
+          Write-Host "Website: $($site.State)"
         env:
           IIS_SITE_NAME: PartsUnlimited
           IIS_APP_POOL_NAME: PartsUnlimitedAppPool
-          IIS_PHYSICAL_PATH: C:\inetpub\wwwroot\PartsUnlimited
-          IIS_PORT: 8080
