@@ -5,7 +5,7 @@ on:
     workflows: [".NET Framework CI"]   # Replace with your CI workflow name
     types:
       - completed
-  workflow_dispatch:  # allows manual trigger
+  workflow_dispatch:
 
 jobs:
   deploy:
@@ -21,7 +21,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Restore NuGet packages
+      # 2️⃣ Setup NuGet
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
@@ -84,7 +84,22 @@ jobs:
           Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
           Write-Host "✅ Deployment completed successfully"
 
-      # 8️⃣ Start IIS App Pool
+      # 8️⃣ Run EF Migrations
+      - name: Apply EF Database Migrations
+        shell: powershell
+        run: |
+          Write-Host "Applying EF migrations..."
+          # Path to your website project (where Packages\EF Tools is)
+          $projectPath = "$PWD\src\PartsUnlimitedWebsite"
+          
+          # Ensure PowerShell can load EF tools
+          Import-Module "$projectPath\packages\EntityFramework.6.6.0\tools\EntityFramework.psd1" -Force
+
+          # Update database
+          Update-Database -ProjectName PartsUnlimitedWebsite -StartUpProjectName PartsUnlimitedWebsite -Verbose
+          Write-Host "✅ Database updated successfully"
+
+      # 9️⃣ Start IIS App Pool
       - name: Start IIS Application Pool
         shell: powershell
         run: |
@@ -93,7 +108,7 @@ jobs:
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 15   # give IIS some time to start
 
-      # 9️⃣ Verify website with retry
+      # 🔟 Verify website
       - name: Verify deployment
         shell: powershell
         run: |
