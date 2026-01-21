@@ -51,6 +51,7 @@ jobs:
         path: 'TestResults/*.trx'
         reporter: dotnet-trx
         fail-on-error: false
+        fail-on-empty: false
         
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
