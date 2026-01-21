@@ -2,9 +2,9 @@ name: PartsUnlimited CI/CD
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ master, develop ]
   pull_request:
-    branches: [ main ]
+    branches: [ master ]
   workflow_dispatch:
 
 env:
@@ -203,7 +203,7 @@ jobs:
     name: Check Self-Hosted Runner
     needs: build
     runs-on: ubuntu-latest
-    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && github.event_name == 'push'
+    if: (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop') && github.event_name == 'push'
     outputs:
       can-deploy: ${{ steps.check.outputs.can-deploy }}
     
@@ -221,7 +221,7 @@ jobs:
     runs-on: self-hosted
     if: |
       needs.check-runner.outputs.can-deploy == 'true' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop') && 
+      (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop') && 
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     
     steps:
