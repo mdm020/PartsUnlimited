@@ -43,15 +43,15 @@ jobs:
       run: vstest.console.exe test\PartsUnlimited.UnitTests\bin\Release\PartsUnlimited.UnitTests.dll /Logger:trx
       continue-on-error: true
       
-    - name: Publish Test Results
-      uses: dorny/test-reporter@v1
-      if: always()
-      with:
-        name: Unit Test Results
-        path: 'TestResults/*.trx'
-        reporter: dotnet-trx
-        fail-on-error: false
-        fail-on-empty: false
+   - name: Publish Test Results
+  uses: dorny/test-reporter@v1
+  if: github.event.pull_request.head.repo.full_name == github.repository
+  with:
+    name: Unit Test Results
+    path: 'TestResults/*.trx'
+    reporter: dotnet-trx
+    fail-on-error: false
+    fail-on-empty: false
         
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
