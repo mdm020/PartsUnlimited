@@ -1,0 +1,140 @@
+name: CD - Deploy to IIS
+
+on:
+  workflow_run:
+    workflows: ["CI - Build and Test"]
+    types: 
+      - completed
+    branches: [main, master]
+  workflow_dispatch:
+    inputs: 
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    environment: 
+      name: ${{ github. event.inputs.environment || 'staging' }}
+    
+    steps:
+    - name: Download build artifacts
+      uses:  actions/download-artifact@v4
+      with:
+        name: partsunlimited-build
+        path: ./artifacts
+        github-token: ${{ secrets. GITHUB_TOKEN }}
+        run-id: ${{ github.event.workflow_run.id }}
+
+    - name: Display artifact structure
+      run: |
+        Write-Host "Artifact structure:"
+        Get-ChildItem -Path ./artifacts -Recurse | Select-Object FullName
+
+    - name:  Prepare deployment package
+      run: |
+        # Find the web application binaries
+        $webAppPath = Get-ChildItem -Path ./artifacts -Recurse -Filter "PartsUnlimitedWebsite" -Directory | Select-Object -First 1
+        if ($webAppPath) {
+          Write-Host "Found web app at: $($webAppPath.FullName)"
+          Copy-Item -Path "$($webAppPath.FullName)\*" -Destination "./deploy" -Recurse -Force
+        } else {
+          # Fallback:  copy all binaries
+          New-Item -ItemType Directory -Path "./deploy" -Force
+          Copy-Item -Path "./artifacts/src/**/bin/Release/*" -Destination "./deploy" -Recurse -Force
+        }
+
+    - name: Stop IIS Application Pool
+      run: |
+        Import-Module WebAdministration
+        $appPoolName = "${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
+        if (Test-Path "IIS:\AppPools\$appPoolName") {
+          Stop-WebAppPool -Name $appPoolName
+          Write-Host "Stopped application pool: $appPoolName"
+          Start-Sleep -Seconds 5
+        } else {
+          Write-Host "Application pool does not exist, will be created"
+        }
+
+    - name: Deploy to IIS
+      run: |
+        Import-Module WebAdministration
+        
+        $siteName = "${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
+        $appPoolName = "${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
+        $physicalPath = "${{ vars.IIS_PHYSICAL_PATH || 'C:\inetpub\wwwroot\PartsUnlimited' }}"
+        $port = "${{ vars.IIS_PORT || '8080' }}"
+        
+        # Create application pool if it doesn't exist
+        if (-not (Test-Path "IIS:\AppPools\$appPoolName")) {
+          New-WebAppPool -Name $appPoolName
+          Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name managedRuntimeVersion -Value "v4.0"
+          Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name managedPipelineMode -Value "Integrated"
+          Write-Host "Created application pool: $appPoolName"
+        }
+        
+        # Create physical path if it doesn't exist
+        if (-not (Test-Path $physicalPath)) {
+          New-Item -ItemType Directory -Path $physicalPath -Force
+          Write-Host "Created physical path:  $physicalPath"
+        }
+        
+        # Copy deployment files
+        Write-Host "Copying files to:  $physicalPath"
+        Copy-Item -Path "./deploy/*" -Destination $physicalPath -Recurse -Force
+        
+        # Create or update IIS website
+        if (-not (Test-Path "IIS:\Sites\$siteName")) {
+          New-Website -Name $siteName -PhysicalPath $physicalPath -ApplicationPool $appPoolName -Port $port
+          Write-Host "Created website: $siteName on port $port"
+        } else {
+          Set-ItemProperty "IIS:\Sites\$siteName" -Name physicalPath -Value $physicalPath
+          Set-ItemProperty "IIS:\Sites\$siteName" -Name applicationPool -Value $appPoolName
+          Write-Host "Updated website: $siteName"
+        }
+
+    - name: Start IIS Application Pool
+      run:  |
+        Import-Module WebAdministration
+        $appPoolName = "${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
+        Start-WebAppPool -Name $appPoolName
+        Write-Host "Started application pool: $appPoolName"
+
+    - name:  Verify deployment
+      run: |
+        $siteName = "${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
+        $port = "${{ vars.IIS_PORT || '8080' }}"
+        
+        Start-Sleep -Seconds 10
+        
+        try {
+          $response = Invoke-WebRequest -Uri "http://localhost:$port" -UseBasicParsing -TimeoutSec 30
+          if ($response.StatusCode -eq 200) {
+            Write-Host "✅ Deployment successful!  Site is responding on port $port"
+          } else {
+            Write-Host "⚠️ Site returned status code: $($response.StatusCode)"
+          }
+        } catch {
+          Write-Host "⚠️ Warning: Could not verify deployment - $_"
+          Write-Host "Please check IIS manually"
+        }
+
+    - name: Deployment summary
+      run: |
+        Write-Host "======================================"
+        Write-Host "Deployment Summary"
+        Write-Host "======================================"
+        Write-Host "Environment: ${{ github.event.inputs.environment || 'staging' }}"
+        Write-Host "Site Name: ${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
+        Write-Host "App Pool:  ${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
+        Write-Host "Physical Path: ${{ vars. IIS_PHYSICAL_PATH || 'C:\inetpub\wwwroot\PartsUnlimited' }}"
+        Write-Host "Port: ${{ vars.IIS_PORT || '8085' }}"
+        Write-Host "======================================"
