@@ -1,46 +1,119 @@
-name: CI - Build and Test
+name: CI/CD - Build and Deploy to IIS
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  workflow_dispatch:  # allows manual run
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: windows-latest
+    # Use self-hosted for deployment step if IIS is local
+    # runs-on: self-hosted
+
+    env:
+      IIS_APP_POOL_NAME: ${{ secrets.IIS_APP_POOL_NAME }}
+      IIS_SITE_PATH: ${{ secrets.IIS_SITE_PATH }}
+      IIS_SITE_URL: ${{ secrets.IIS_SITE_URL }}
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      # 1️⃣ Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v1
+      # 2️⃣ Setup NuGet
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-    - name: Restore NuGet packages
-      run: nuget restore PartsUnlimited.sln
+      # 3️⃣ Restore NuGet packages
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
 
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v1
+      # 4️⃣ Setup MSBuild
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
-    - name: Build solution (Release)
-      run: msbuild PartsUnlimited.sln /p:Configuration=Release /m
+      # 5️⃣ Build solution and publish website
+      - name: Build & Publish Website
+        run: |
+          mkdir artifact
+          msbuild PartsUnlimited.sln `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=artifact `
+            /p:DeployTarget=WebPublish `
+            /p:OutDir=artifact\
 
-    - name: Run unit tests
-      run: |
-        # Find test assemblies and run with vstest.console.exe
-        $testExe = 'vstest.console.exe'
-        $vsWhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"
-        if (Test-Path $vsWhere) {
-          $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1
-          $vstest = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe'
-          if (Test-Path $vstest) { $testExe = $vstest }
-        }
-        Get-ChildItem -Path . -Recurse -Filter '*PartsUnlimited.UnitTests*.dll' | ForEach-Object { & $testExe $_.FullName }
-    - name: Publish build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: partsunlimited-build
-        path: |
-          src/**/bin/Release
-          src/**/bin
+      # 6️⃣ Run MSTest unit tests (excluding Selenium)
+      - name: Run Unit Tests
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe | Select-Object -First 1
+          Write-Host "Using vstest: $vstest"
+          & "$vstest" **\bin\Release\*UnitTests.dll /Platform:x64
+
+      # 7️⃣ Stop IIS App Pool
+      - name: Stop IIS Application Pool
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: |
+          Import-Module WebAdministration
+          Write-Host "Stopping App Pool: $env:IIS_APP_POOL_NAME"
+          Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
+          Start-Sleep -Seconds 5
+
+      # 8️⃣ Backup existing site (optional)
+      - name: Backup existing IIS site
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: |
+          $destination = $env:IIS_SITE_PATH
+          if (Test-Path $destination) {
+              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
+              Write-Host "Backup created at: $backupPath"
+          }
+
+      # 9️⃣ Deploy artifact to IIS
+      - name: Deploy to IIS
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: |
+          $source = "artifact\*"
+          $destination = $env:IIS_SITE_PATH
+          Write-Host "Deploying from: $source"
+          Write-Host "Deploying to: $destination"
+          Copy-Item -Path $source -Destination $destination -Recurse -Force
+          Write-Host "✅ Deployment completed successfully"
+
+      # 🔟 Start IIS App Pool
+      - name: Start IIS Application Pool
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: |
+          Import-Module WebAdministration
+          Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
+          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
+          Start-Sleep -Seconds 5
+
+      # 1️⃣1️⃣ Verify deployment
+      - name: Verify deployment
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+        shell: pwsh
+        run: |
+          $url = $env:IIS_SITE_URL
+          Write-Host "Checking website: $url"
+          try {
+              $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Website is responding successfully"
+              } else {
+                  Write-Warning "⚠️ Website returned status code: $($response.StatusCode)"
+              }
+          } catch {
+              Write-Error "❌ Website check failed: $_"
+              exit 1
+          }
