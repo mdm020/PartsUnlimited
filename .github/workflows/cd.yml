@@ -1,16 +1,15 @@
 name: CD - Deploy to IIS
 
 on:
-  workflow_dispatch:      # Manual trigger
   workflow_run:
-    workflows: ["CI - Build and Test"]
+    workflows: [".NET Framework CI"]   # Replace with your CI workflow name
     types:
       - completed
+  workflow_dispatch:  # allows manual trigger
 
 jobs:
   deploy:
-    runs-on: self-hosted   # Your Windows self-hosted runner
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: self-hosted
 
     env:
       IIS_APP_POOL_NAME: PartsUnlimitedAppPool
@@ -18,96 +17,110 @@ jobs:
       IIS_SITE_URL: http://localhost:8080/
 
     steps:
-      # 1️⃣ Checkout code (needed for paths)
-      - name: Checkout
+      # 1️⃣ Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Download CI artifact
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: partsunlimited-build
-          path: artifact
+      # 2️⃣ Restore NuGet packages
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-      # 3️⃣ Stop IIS App Pool
-      - name: Stop IIS App Pool
-        shell: pwsh
+      - name: Restore packages
+        run: nuget restore PartsUnlimited.sln
+
+      # 3️⃣ Setup MSBuild
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # 4️⃣ Build & Publish Website
+      - name: Build & Publish Website
         run: |
-          Import-Module WebAdministration -ErrorAction Stop
+          $artifactPath = "$PWD\artifact"
+          mkdir $artifactPath -Force
+
+          msbuild PartsUnlimited.sln `
+            /p:Configuration=Release `
+            /p:Platform="Any CPU" `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=$artifactPath `
+            /p:DeployTarget=WebPublish
+
+          Write-Host "Published files:"
+          Get-ChildItem -Path $artifactPath -Recurse
+
+      # 5️⃣ Stop IIS App Pool
+      - name: Stop IIS Application Pool
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
           Write-Host "Stopping App Pool: $env:IIS_APP_POOL_NAME"
           Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
-      # 4️⃣ Backup existing IIS site (optional)
+      # 6️⃣ Backup existing IIS site
       - name: Backup existing IIS site
-        shell: pwsh
+        shell: powershell
         run: |
-          $dest = $env:IIS_SITE_PATH
-          if (Test-Path $dest) {
-              $backup = "$dest-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-              Copy-Item -Path $dest -Destination $backup -Recurse -Force
-              Write-Host "Backup created at: $backup"
-          }
-
-      # 5️⃣ Deploy new files
-      - name: Deploy website
-        shell: pwsh
-        run: |
-          $source = "artifact\**\*"
           $destination = $env:IIS_SITE_PATH
-          if (-not (Test-Path $destination)) { mkdir $destination }
-          Copy-Item -Path $source -Destination $destination -Recurse -Force
-          Write-Host "✅ Deployment completed"
-
-      # 6️⃣ Run EF6 Migrations
-      - name: Apply EF database migrations
-        shell: pwsh
-        run: |
-          $projectPath = "$PWD\src\PartsUnlimitedWebsite"
-          $toolsPath = Join-Path $projectPath "packages\EntityFramework.6.6.0\tools"
-
-          if (Test-Path "$toolsPath\Update-Database.exe") {
-              Write-Host "Applying EF6 migrations..."
-              & "$toolsPath\Update-Database.exe" -ProjectName PartsUnlimitedWebsite -StartUpProjectName PartsUnlimitedWebsite -Verbose
-              Write-Host "✅ Database updated"
-          } else {
-              Write-Warning "EF tools not found at $toolsPath. Skipping migrations."
+          if (Test-Path $destination) {
+              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force -Verbose
+              Write-Host "Backup created at: $backupPath"
           }
 
-      # 7️⃣ Start IIS App Pool
-      - name: Start IIS App Pool
-        shell: pwsh
+      # 7️⃣ Deploy to IIS
+      - name: Deploy to IIS
+        shell: powershell
         run: |
-          Import-Module WebAdministration -ErrorAction Stop
+          $source = "$PWD\artifact\*"
+          $destination = $env:IIS_SITE_PATH
+          Write-Host "Deploying files from $source to $destination"
+          
+          if (-not (Test-Path $destination)) {
+              mkdir $destination
+          }
+
+          Copy-Item -Path $source -Destination $destination -Recurse -Force -Verbose
+          Write-Host "✅ Deployment completed successfully"
+
+      # 8️⃣ Start IIS App Pool
+      - name: Start IIS Application Pool
+        shell: powershell
+        run: |
+          Import-Module WebAdministration
           Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Sleep -Seconds 10
+          Start-Sleep -Seconds 15   # give IIS some time to start
 
-      # 8️⃣ Verify website
+      # 9️⃣ Verify website with retry
       - name: Verify deployment
-        shell: pwsh
+        shell: powershell
         run: |
           $url = $env:IIS_SITE_URL
           $maxRetries = 10
-          $delay = 5
-          $ok = $false
+          $delaySeconds = 10
+          $success = $false
 
-          Write-Host "Checking website: $url"
+          Write-Host "Verifying website: $url"
+
           for ($i=1; $i -le $maxRetries; $i++) {
               try {
-                  $res = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
-                  if ($res.StatusCode -eq 200) {
-                      Write-Host "✅ Website is responding"
-                      $ok = $true
+                  $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
+                  if ($response.StatusCode -eq 200) {
+                      Write-Host "Website is responding successfully ✅"
+                      $success = $true
                       break
+                  } else {
+                      Write-Warning "Attempt ${i}: Website returned status code $($response.StatusCode)"
                   }
               } catch {
-                  Write-Warning "Attempt $i: Website not reachable yet"
+                  Write-Warning "Attempt ${i}: Website not reachable yet"
               }
-              Start-Sleep -Seconds $delay
+              Start-Sleep -Seconds $delaySeconds
           }
 
-          if (-not $ok) {
-              Write-Error "❌ Website verification failed"
+          if (-not $success) {
+              Write-Error "Website verification failed after $maxRetries attempts ❌"
               exit 1
           }
