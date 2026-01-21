@@ -1,4 +1,4 @@
-name: .NET Framework CI (GitHub Actions)
+name: .NET Framework CI
 
 on:
   push:
@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      # 1️⃣ Checkout source code
+      # 1️⃣ Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -26,22 +26,24 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # 4️⃣ Build & publish web project
+      # 4️⃣ Build solution & publish website
       - name: Build & Publish Website
         run: |
           # Ensure artifact folder exists
           mkdir artifact
 
-          # Build & publish only the website project (classic ASP.NET Web App)
-          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+          # Build the solution and publish the web project
+          msbuild PartsUnlimited.sln `
             /p:Configuration=Release `
+            /p:Platform="Any CPU" `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
             /p:PublishUrl=artifact `
-            /p:Platform=AnyCPU
+            /p:DeployTarget=WebPublish `
+            /p:OutDir=artifact\
 
       # 5️⃣ Run MSTest unit tests (exclude Selenium/UI tests)
-      - name: Run Unit Tests (MSTest)
+      - name: Run Unit Tests
         shell: pwsh
         run: |
           # Locate vstest.console.exe dynamically
@@ -54,11 +56,11 @@ jobs:
           # Run all unit test DLLs in the solution (bin/Release)
           & "$vstest" **\bin\Release\*UnitTests.dll /Platform:x64
 
-      # 6️⃣ Verify artifact folder (debugging)
+      # 6️⃣ Debug: List artifact contents
       - name: List artifact folder contents
         run: dir artifact
 
-      # 7️⃣ Upload artifacts to GitHub Actions
+      # 7️⃣ Upload build artifacts
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
