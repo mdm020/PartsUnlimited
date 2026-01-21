@@ -1,27 +1,56 @@
-name: CI
- 
+name: .NET Framework CI
+
 on:
-push:
-branches: [ "master" ]
-pull_request:
- 
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
 jobs:
-build:
-runs-on: windows-latest
- 
-steps:
-- name: Checkout repo
-uses: actions/checkout@v4
- 
-- name: Setup MSBuild
-uses: microsoft/setup-msbuild@v2
- 
-- name: Restore NuGet packages
-run: nuget restore PartsUnlimited.sln
- 
-- name: Build solution
-run: msbuild PartsUnlimited.sln /p:Configuration=Release
- 
-- name: Run Unit Tests
-run: dotnet test test/PartsUnlimited.UnitTests/PartsUnlimited.UnitTests.csproj --configuration Release --no-build
- 
+  build-test-artifact:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build solution
+        run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /m
+
+      - name: Run Unit Tests (MSTest)
+        shell: pwsh
+        run: |
+          $vsTestPaths = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find **\vstest.console.exe
+
+          $vsTestPath = $vsTestPaths | Select-Object -First 1
+
+          Write-Host "Using VsTest at: $vsTestPath"
+
+          & "$vsTestPath" `
+            **\bin\Release\*UnitTests.dll `
+            **\bin\Release\*Tests.dll `
+            /Platform:x64
+
+      - name: Prepare artifacts
+        run: |
+          mkdir artifact
+          xcopy /s /y src\PartsUnlimitedWebsite\bin\Release artifact\
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-Build
+          path: artifact
