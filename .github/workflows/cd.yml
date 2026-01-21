@@ -1,38 +1,54 @@
 name: CD - Deploy to IIS
 
+# Trigger manually or after CI workflow completes
 on:
   workflow_run:
-    workflows: ["CI Build and Test"]   # Name of your CI workflow
+    workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
     types:
       - completed
-  workflow_dispatch:
+  workflow_dispatch:  # manual trigger
 
 jobs:
   deploy:
     runs-on: self-hosted
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    if: >
+      github.event_name == 'workflow_dispatch' || 
+      (github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'master'))
 
     steps:
-      # 1️⃣ Checkout (required for runner context)
-      - name: Checkout code
+      # 1️⃣ Checkout repository (required for context)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2️⃣ Download CI artifact
+      # 2️⃣ Download artifact from CI
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: PartsUnlimited-Web
           path: artifact
 
-      # 3️⃣ Stop IIS app pool (optional: graceful stop)
+      # 3️⃣ Stop IIS Application Pool
       - name: Stop IIS Application Pool
         shell: pwsh
         run: |
           Import-Module WebAdministration
+          Write-Host "Stopping App Pool: $($env:IIS_APP_POOL_NAME)"
           Stop-WebAppPool -Name "${{ secrets.IIS_APP_POOL_NAME }}"
           Start-Sleep -Seconds 5
 
-      # 4️⃣ Deploy files to IIS site
+      # 4️⃣ Backup existing IIS site (optional)
+      - name: Backup existing IIS site
+        shell: pwsh
+        run: |
+          $destination = "${{ secrets.IIS_SITE_PATH }}"
+          if (Test-Path $destination) {
+              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
+              Write-Host "Backup created at: $backupPath"
+          }
+
+      # 5️⃣ Deploy artifact to IIS
       - name: Deploy to IIS
         shell: pwsh
         run: |
@@ -40,27 +56,19 @@ jobs:
           $destination = "${{ secrets.IIS_SITE_PATH }}"
           Write-Host "Deploying from: $source"
           Write-Host "Deploying to: $destination"
-
-          # Optional backup of existing site
-          if (Test-Path $destination) {
-              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
-              Write-Host "Backup created at: $backupPath"
-          }
-
-          # Copy new build files to IIS site
           Copy-Item -Path $source -Destination $destination -Recurse -Force
           Write-Host "✅ Deployment completed successfully"
 
-      # 5️⃣ Start IIS app pool
+      # 6️⃣ Start IIS Application Pool
       - name: Start IIS Application Pool
         shell: pwsh
         run: |
           Import-Module WebAdministration
+          Write-Host "Starting App Pool: $($env:IIS_APP_POOL_NAME)"
           Start-WebAppPool -Name "${{ secrets.IIS_APP_POOL_NAME }}"
           Start-Sleep -Seconds 5
 
-      # 6️⃣ Verify deployment
+      # 7️⃣ Verify website is responding
       - name: Verify deployment
         shell: pwsh
         run: |
