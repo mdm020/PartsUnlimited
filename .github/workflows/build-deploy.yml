@@ -9,7 +9,13 @@ on:
 
 env:
   SOLUTION_PATH: './PartsUnlimited.sln'
+  WEBSITE_PROJECT_PATH: './src/PartsUnlimitedWebsite/PartsUnlimitedWebsite.csproj'
   BUILD_CONFIGURATION: 'Release'
+  DOTNET_VERSION: '4.8'
+  IIS_SITE_NAME: 'MyDotNetApp'
+  IIS_APP_POOL: 'PartsUnlimitedAppPool'
+  DEPLOYMENT_PATH: 'C:\inetpub\wwwroot\PartsUnlimited'
+  IIS_PORT: 8080
 
 jobs:
   build-and-test:
@@ -74,20 +80,37 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         name: partsunlimited-build
-        path: C:\temp\deploy
+        path: ${{ env.DEPLOYMENT_PATH }}\staging
 
-    - name: Copy artifacts to IIS
+    - name: Deploy to IIS
       shell: powershell
       run: |
-        $deployPath = "C:\inetpub\wwwroot\PartsUnlimited"
+        Import-Module WebAdministration
         
-        # Clear existing files
-        if (Test-Path $deployPath) { 
-          Remove-Item $deployPath -Recurse -Force 
+        $appPool = "${{ env.IIS_APP_POOL }}"
+        $site = "${{ env.IIS_SITE_NAME }}"
+        $path = "${{ env.DEPLOYMENT_PATH }}"
+        
+        # Stop app pool SAFELY - check state first
+        if (Test-Path "IIS:\AppPools\$appPool") {
+          $state = (Get-WebAppPoolState -Name $appPool).Value
+          if ($state -ne "Stopped") {
+            Stop-WebAppPool $appPool
+            Start-Sleep 3
+          }
         }
-        New-Item -ItemType Directory -Path $deployPath -Force
         
-        # Copy new files
-        Copy-Item "C:\temp\deploy\*" $deployPath -Recurse -Force
+        # Copy files (overwrite)
+        if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+        New-Item -ItemType Directory -Path $path -Force
+        Copy-Item "${path}\staging\*" $path -Recurse -Force
         
-        Write-Host "Deployed to $deployPath"
+        # Ensure app pool exists and configure
+        if (-not (Test-Path "IIS:\AppPools\$appPool")) {
+          New-WebAppPool $appPool
+          Set-ItemProperty "IIS:\AppPools\$appPool" "managedRuntimeVersion" "${{ env.DOTNET_VERSION }}"
+        }
+        Start-WebAppPool $appPool
+        Start-Website $site -ErrorAction SilentlyContinue
+        
+        Write-Host "Deployed to http://localhost:${{ env.IIS_PORT }}"
