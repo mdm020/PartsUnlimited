@@ -1,31 +1,110 @@
-name: CD - Deploy to IIS
+name: CI Build and Test
 
 on:
-  workflow_run:
-    workflows: ["CI Build and Test"]
-    types:
-      - completed
-    branches: [main, master]
-  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
-  deploy:
+  build-test-artifact:
     runs-on: windows-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Setup NuGet and restore packages
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
+
+      # Setup MSBuild
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Build solution & publish website
+      - name: Build & Publish Website
+        run: |
+          # Build the web project and publish to artifact folder
+          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=..\..\artifact `
+            /p:DeployTarget=WebPublish
+
+      # Build test projects
+      - name: Build Test Projects
+        run: |
+          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU
+        continue-on-error: true
+
+      # Run MSTest unit tests
+      - name: Run Unit Tests
+        shell: pwsh
+        run: |
+          # Locate vstest.console.exe dynamically
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
+            Select-Object -First 1
+
+          Write-Host "Using vstest: $vstest"
+
+          # Find and run unit test DLLs
+          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
+            Where-Object { $_.FullName -like "*\bin\Release\*" } |
+            Select-Object -ExpandProperty FullName
+
+          if ($testDlls) {
+            Write-Host "Found test DLLs:"
+            $testDlls | ForEach-Object { Write-Host "  $_" }
+            & "$vstest" $testDlls /Platform:x64 /Logger:trx
+          } else {
+            Write-Host "No test DLLs found"
+          }
+        continue-on-error: true
+
+      # List artifact contents
+      - name: List artifact folder contents
+        run: |
+          if (Test-Path "artifact") {
+            Write-Host "Artifact folder contents:"
+            Get-ChildItem artifact -Recurse | Select-Object FullName
+          } else {
+            Write-Host "Artifact folder not found"
+          }
+
+      # Upload build artifacts
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
+
+  deploy:
+    needs: build-test-artifact
+    runs-on: windows-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
       # Checkout repository to get deployment script
       - name: Checkout repository
         uses: actions/checkout@v4
       
-      # Download build artifacts from CI workflow
+      # Download build artifacts
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           name: PartsUnlimited-Web
           path: ./artifacts
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
       
       # Display artifact structure
       - name: Display artifact structure
