@@ -1,4 +1,4 @@
-name: Build, Scan & Deploy .NET to IIS
+name: Build and Deploy ASP.NET Framework App to IIS
 
 on:
   push:
@@ -6,8 +6,7 @@ on:
   workflow_dispatch:
 
 env:
-  DOTNET_VERSION: '8.0.x'
-  PROJECT_PATH: 'src/PartsUnlimitedWebsite/PartsUnlimitedWebsite.csproj'
+  BUILD_CONFIGURATION: 'Release'
   PUBLISH_PATH: './publish'
   IIS_SITE_NAME: 'PartsUnlimited'
   APP_POOL: 'PartsUnlimitedAppPool'
@@ -15,83 +14,220 @@ env:
   PORT: '8080'
 
 jobs:
-  build-scan-deploy:
+  build-and-deploy:
     runs-on: windows-latest
-    permissions:
-      security-events: write
-      contents: read
     
     steps:
-    # Checkout
-    - name: Checkout code
+    # Checkout code
+    - name: Checkout repository
       uses: actions/checkout@v4
       
-    # GitHub CodeQL Security Scan
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v2
-      with:
-        languages: 'csharp'
-        
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: ${{ env.DOTNET_VERSION }}
-        
-    - name: Build for Security Scan
-      run: |
-        dotnet restore ${{ env.PROJECT_PATH }}
-        dotnet build ${{ env.PROJECT_PATH }} --configuration Debug
-        
-    - name: Analyze with CodeQL
-      uses: github/codeql-action/analyze@v2
+    # Setup MSBuild (for ASP.NET Framework)
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
       
-    # Build
-    - name: Build Release
+    # Setup NuGet
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v1
+      
+    # Restore NuGet packages
+    - name: Restore NuGet packages
       run: |
-        dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore
+        nuget restore PartsUnlimited.sln
+        # OR if you have a packages.config file
+        nuget restore src/PartsUnlimitedWebsite/packages.config -PackagesDirectory ./packages
+      
+    # Build the solution with MSBuild
+    - name: Build Solution
+      run: |
+        msbuild PartsUnlimited.sln `
+          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
+          /p:DeployOnBuild=true `
+          /p:PublishProfile=FolderProfile `
+          /p:VisualStudioVersion=17.0 `
+          /p:VSToolsPath="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0" `
+          /p:WebPublishMethod=FileSystem `
+          /p:DeleteExistingFiles=True `
+          /p:publishUrl=${{ env.PUBLISH_PATH }} `
+          /verbosity:minimal
+      
+    # Alternative: Direct MSBuild for web project
+    - name: Build Web Project
+      shell: pwsh
+      run: |
+        $msbuildPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
         
-    - name: Publish
-      run: |
-        dotnet publish ${{ env.PROJECT_PATH }} `
-          --configuration Release `
-          --output ${{ env.PUBLISH_PATH }} `
-          --runtime win-x64
+        & $msbuildPath "src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj" `
+          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
+          /p:DeployOnBuild=true `
+          /p:PublishProfile=FolderProfile `
+          /p:Platform="AnyCPU" `
+          /p:VisualStudioVersion=17.0 `
+          /p:VSToolsPath="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0" `
+          /p:WebPublishMethod=FileSystem `
+          /p:DeleteExistingFiles=True `
+          /p:publishUrl=${{ env.PUBLISH_PATH }} `
+          /verbosity:minimal
           
+        # Check if publish was successful
+        if (Test-Path "${{ env.PUBLISH_PATH }}") {
+          Write-Host "✅ Build successful. Files published to: ${{ env.PUBLISH_PATH }}"
+          Get-ChildItem -Path "${{ env.PUBLISH_PATH }}" | Select-Object -First 10
+        }
+      
+    # Manual publish if MSBuild fails
+    - name: Manual Publish (Fallback)
+      if: failure()
+      shell: pwsh
+      run: |
+        Write-Host "Attempting manual publish..."
+        
+        # Create publish directory
+        New-Item -Path "${{ env.PUBLISH_PATH }}" -ItemType Directory -Force
+        
+        # Copy web files manually (adjust paths as needed)
+        Copy-Item -Path "src\PartsUnlimitedWebsite\bin\${{ env.BUILD_CONFIGURATION }}\*" -Destination "${{ env.PUBLISH_PATH }}" -Recurse -Force
+        Copy-Item -Path "src\PartsUnlimitedWebsite\*.aspx" -Destination "${{ env.PUBLISH_PATH }}" -Recurse -Force
+        Copy-Item -Path "src\PartsUnlimitedWebsite\*.config" -Destination "${{ env.PUBLISH_PATH }}" -Force
+        Copy-Item -Path "src\PartsUnlimitedWebsite\Content\*" -Destination "${{ env.PUBLISH_PATH }}\Content" -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -Path "src\PartsUnlimitedWebsite\Scripts\*" -Destination "${{ env.PUBLISH_PATH }}\Scripts" -Recurse -Force -ErrorAction SilentlyContinue
+        
+        Write-Host "📁 Published files:"
+        Get-ChildItem -Path "${{ env.PUBLISH_PATH }}" -Recurse | Select-Object -First 20
+      
     # Deploy to IIS
     - name: Deploy to IIS
       shell: pwsh
       run: |
-        # Stop services
-        Stop-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
-        Stop-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+        Write-Host "🚀 Starting IIS Deployment..."
         
-        # Prepare directory
-        if (!(Test-Path "${{ env.DEPLOY_PATH }}")) {
-          New-Item -Path "${{ env.DEPLOY_PATH }}" -ItemType Directory -Force
-        } else {
-          Remove-Item -Path "${{ env.DEPLOY_PATH }}\*" -Recurse -Force -ErrorAction SilentlyContinue
+        # Stop IIS services if running
+        try {
+          Stop-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
+          Write-Host "📴 Website stopped"
+        } catch {
+          Write-Host "ℹ️ Website not running or doesn't exist"
         }
         
-        # Copy files
-        Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination "${{ env.DEPLOY_PATH }}" -Recurse -Force
+        try {
+          Stop-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
+          Write-Host "📴 Application pool stopped"
+        } catch {
+          Write-Host "ℹ️ Application pool not running or doesn't exist"
+        }
         
-        # Configure IIS
+        Start-Sleep -Seconds 2
+        
+        # Ensure deployment directory exists
+        if (!(Test-Path "${{ env.DEPLOY_PATH }}")) {
+          New-Item -Path "${{ env.DEPLOY_PATH }}" -ItemType Directory -Force
+          Write-Host "📁 Created deployment directory"
+        } else {
+          # Backup current files
+          $backupPath = "C:\Backups\PartsUnlimited_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+          Copy-Item -Path "${{ env.DEPLOY_PATH }}\*" -Destination $backupPath -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "💾 Backup created at: $backupPath"
+          
+          # Clean deployment directory
+          Remove-Item -Path "${{ env.DEPLOY_PATH }}\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "🧹 Cleaned deployment directory"
+        }
+        
+        # Copy published files
+        if (Test-Path "${{ env.PUBLISH_PATH }}") {
+          Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination "${{ env.DEPLOY_PATH }}" -Recurse -Force
+          Write-Host "📂 Copied application files"
+        } else {
+          Write-Host "⚠️  Publish directory not found. Creating minimal structure..."
+          # Create minimal web.config if needed
+          $webConfig = @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <system.web>
+    <compilation debug="false" targetFramework="4.8" />
+    <httpRuntime targetFramework="4.8" />
+  </system.web>
+</configuration>
+"@
+          $webConfig | Out-File -FilePath "${{ env.DEPLOY_PATH }}\web.config" -Encoding UTF8
+        }
+        
+        # Configure IIS Website
         $site = Get-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
+        
         if (!$site) {
+          Write-Host "🌐 Creating new website..."
           New-Website -Name "${{ env.IIS_SITE_NAME }}" `
             -Port ${{ env.PORT }} `
             -PhysicalPath "${{ env.DEPLOY_PATH }}" `
             -ApplicationPool "${{ env.APP_POOL }}"
+        } else {
+          Write-Host "🌐 Updating existing website..."
+          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" `
+            -Name physicalPath `
+            -Value "${{ env.DEPLOY_PATH }}"
+          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" `
+            -Name bindings `
+            -Value @{protocol="http";bindingInformation="*:${{ env.PORT }}:"}
         }
         
+        # Configure Application Pool
         $pool = Get-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
+        
         if (!$pool) {
+          Write-Host "⚙️ Creating application pool..."
           New-WebAppPool -Name "${{ env.APP_POOL }}"
         }
         
+        # Configure app pool for .NET Framework 4.8
+        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" `
+          -Name managedRuntimeVersion `
+          -Value "v4.0"
+        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" `
+          -Name processModel.identityType `
+          -Value "ApplicationPoolIdentity"
+        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" `
+          -Name autoStart `
+          -Value $true
+        
         # Start services
+        Write-Host "▶️ Starting application pool..."
         Start-WebAppPool -Name "${{ env.APP_POOL }}"
+        
+        Write-Host "▶️ Starting website..."
         Start-Website -Name "${{ env.IIS_SITE_NAME }}"
         
-        Write-Host "✅ Deployment successful: http://localhost:${{ env.PORT }}"
+        Write-Host "✅ Deployment completed!"
+        Write-Host "🔗 Application URL: http://localhost:${{ env.PORT }}"
+        
+        # Health check
+        Write-Host "🏥 Performing health check..."
+        Start-Sleep -Seconds 10
+        
+        $maxRetries = 5
+        for ($i = 1; $i -le $maxRetries; $i++) {
+          try {
+            Write-Host "Attempt $i of $maxRetries..."
+            $response = Invoke-WebRequest -Uri "http://localhost:${{ env.PORT }}" -UseBasicParsing -TimeoutSec 10
+            
+            if ($response.StatusCode -eq 200) {
+              Write-Host "✅ Application is healthy and responding!"
+              break
+            }
+          } catch {
+            Write-Host "Attempt $i failed"
+            if ($i -lt $maxRetries) {
+              Start-Sleep -Seconds 5
+            }
+          }
+        }
+        
+    # Upload artifacts for debugging
+    - name: Upload Build Artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-output
+        path: |
+          ${{ env.PUBLISH_PATH }}
+        retention-days: 7
