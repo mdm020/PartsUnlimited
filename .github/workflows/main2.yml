@@ -1,0 +1,76 @@
+name: Deploy to IIS
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: self-hosted
+    
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
+
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v1.0.5
+
+    - name: Restore NuGet Packages
+      run: nuget restore PartsUnlimited.sln
+
+    - name: Build Solution
+      run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:DeployOnBuild=false
+
+    - name: Run Unit Tests
+      run: |
+        # Assuming vstest.console.exe is in PATH or added by setup-msbuild/VS installation
+        # If not, you might need to specify the full path to vstest.console.exe
+        vstest.console.exe test\PartsUnlimited.UnitTests\bin\Release\PartsUnlimited.UnitTests.dll
+
+    - name: Deploy to IIS
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        
+        $appPoolName = "PartsUnlimitedAppPool"
+        $websiteName = "PartsUnlimited"
+        $websitePath = "C:\inetpub\wwwroot\PartsUnlimited"
+        $websitePort = 8080
+
+        # Ensure App Pool exists
+        if (!(Test-Path "IIS:\AppPools\$appPoolName")) {
+            Write-Host "Creating App Pool: $appPoolName"
+            New-WebAppPool -Name $appPoolName
+            Set-ItemProperty "IIS:\AppPools\$appPoolName" -Name "managedRuntimeVersion" -Value "v4.0"
+        }
+
+        # Ensure Website exists
+        if (!(Test-Path "IIS:\Sites\$websiteName")) {
+            Write-Host "Creating Website: $websiteName"
+            # Create directory if it doesn't exist
+            if (!(Test-Path $websitePath)) {
+                New-Item -ItemType Directory -Force -Path $websitePath
+            }
+            New-Website -Name $websiteName -PhysicalPath $websitePath -Port $websitePort -ApplicationPool $appPoolName
+        }
+
+        # Stop App Pool
+        Write-Host "Stopping App Pool..."
+        Stop-WebAppPool -Name $appPoolName
+        
+        # Wait a bit for the process to release files
+        Start-Sleep -Seconds 5
+
+        try {
+            # Publish using MSBuild
+            Write-Host "Publishing application..."
+            msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj /p:Configuration=Release /p:DeployOnBuild=true /p:WebPublishMethod=FileSystem /p:publishUrl=$websitePath /p:DeleteExistingFiles=false
+        }
+        finally {
+            # Start App Pool
+            Write-Host "Starting App Pool..."
+            Start-WebAppPool -Name $appPoolName
+        }
