@@ -1,7 +1,11 @@
-name: CD - Deploy to IIS (Manual)
+name: CD - Deploy to IIS
 
 on:
-  workflow_dispatch:
+  workflow_run:
+    workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
+    types:
+      - completed
+  workflow_dispatch:  # manual trigger
 
 jobs:
   deploy:
@@ -13,18 +17,22 @@ jobs:
       IIS_SITE_URL: ${{ secrets.IIS_SITE_URL }}
 
     steps:
+      # 1️⃣ Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2️⃣ Restore NuGet packages
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
-      - name: Restore NuGet packages
+      - name: Restore packages
         run: nuget restore PartsUnlimited.sln
 
+      # 3️⃣ Setup MSBuild
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
+      # 4️⃣ Build & Publish Website
       - name: Build & Publish Website
         run: |
           mkdir artifact
@@ -37,13 +45,16 @@ jobs:
             /p:DeployTarget=WebPublish `
             /p:OutDir=artifact\
 
-      - name: Stop IIS App Pool
+      # 5️⃣ Stop IIS App Pool
+      - name: Stop IIS Application Pool
         shell: powershell
         run: |
           Import-Module WebAdministration
+          Write-Host "Stopping App Pool: $env:IIS_APP_POOL_NAME"
           Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
+      # 6️⃣ Backup existing IIS site
       - name: Backup existing IIS site
         shell: powershell
         run: |
@@ -51,24 +62,57 @@ jobs:
           if (Test-Path $destination) {
               $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
               Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
+              Write-Host "Backup created at: $backupPath"
           }
 
+      # 7️⃣ Deploy to IIS
       - name: Deploy to IIS
         shell: powershell
         run: |
-          Copy-Item -Path "artifact\*" -Destination $env:IIS_SITE_PATH -Recurse -Force
+          $source = "artifact\*"
+          $destination = $env:IIS_SITE_PATH
+          Write-Host "Deploying from: $source"
+          Write-Host "Deploying to: $destination"
+          Copy-Item -Path $source -Destination $destination -Recurse -Force
+          Write-Host "✅ Deployment completed successfully"
 
-      - name: Start IIS App Pool
+      # 8️⃣ Start IIS App Pool
+      - name: Start IIS Application Pool
         shell: powershell
         run: |
+          Import-Module WebAdministration
+          Write-Host "Starting App Pool: $env:IIS_APP_POOL_NAME"
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Sleep -Seconds 5
+          Start-Sleep -Seconds 10   # allow IIS to warm up
 
-      - name: Verify Deployment
+      # 9️⃣ Verify website with retry
+      - name: Verify deployment
         shell: powershell
         run: |
-          try {
-              $response = Invoke-WebRequest -Uri $env:IIS_SITE_URL -UseBasicParsing -TimeoutSec 30
-              if ($response.StatusCode -eq 200) { Write-Host "✅ Website is responding successfully" }
-              else { Write-Warning "⚠️ Website returned status code: $($response.StatusCode)" }
-          } catch { Write-Error "❌ Website check failed: $_"; exit 1 }
+          $url = $env:IIS_SITE_URL
+          $maxRetries = 5
+          $delaySeconds = 5
+          $success = $false
+
+          Write-Host "Verifying website: $url"
+
+          for ($i=1; $i -le $maxRetries; $i++) {
+              try {
+                  $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
+                  if ($response.StatusCode -eq 200) {
+                      Write-Host "✅ Website is responding successfully"
+                      $success = $true
+                      break
+                  } else {
+                      Write-Warning "⚠️ Attempt $i: Status code $($response.StatusCode)"
+                  }
+              } catch {
+                  Write-Warning "⚠️ Attempt $i: Website not reachable yet"
+              }
+              Start-Sleep -Seconds $delaySeconds
+          }
+
+          if (-not $success) {
+              Write-Error "❌ Website verification failed after $maxRetries attempts"
+              exit 1
+          }
