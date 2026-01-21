@@ -1,0 +1,239 @@
+name: PartsUnlimited CI/CD
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+env:
+  SOLUTION_PATH: './PartsUnlimited.sln'
+  WEBSITE_PROJECT_PATH: './src/PartsUnlimitedWebsite/PartsUnlimitedWebsite.csproj'
+  BUILD_CONFIGURATION: 'Release'
+  DOTNET_VERSION: '4.8'
+  IIS_SITE_NAME: 'MyDotNetApp'
+  IIS_APP_POOL: 'PartsUnlimitedAppPool'
+  DEPLOYMENT_PATH: 'C:\inetpub\wwwroot\PartsUnlimited'
+  IIS_PORT: 8080
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup NuGet
+      uses: nuget/setup-nuget@v1
+      with:
+        nuget-version: 'latest'
+    
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1.1
+      with:
+        msbuild-architecture: x64
+    
+    - name: Restore NuGet packages
+      run: nuget restore ${{ env.SOLUTION_PATH }}
+    
+    - name: Build solution
+      run: msbuild ${{ env.SOLUTION_PATH }} /p:Configuration=${{ env.BUILD_CONFIGURATION }} /p:Platform="Any CPU" /p:DeployOnBuild=true /p:DeployDefaultTarget=WebPublish /p:WebPublishMethod=FileSystem /p:DeleteExistingFiles=True /p:publishUrl="${{ github.workspace }}\publish"
+    
+    - name: Run Unit Tests
+      run: |
+        dotnet test ./test/PartsUnlimited.UnitTests/PartsUnlimited.UnitTests.csproj --configuration ${{ env.BUILD_CONFIGURATION }} --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+      continue-on-error: true
+    
+    - name: Publish Test Results
+      uses: dorny/test-reporter@v1
+      if: always()
+      with:
+        name: Unit Test Results
+        path: '**/test-results.trx'
+        reporter: dotnet-trx
+        fail-on-error: false
+    
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: partsunlimited-build
+        path: ${{ github.workspace }}\publish
+        retention-days: 7
+
+  deploy:
+    name: Deploy to IIS
+    needs: build
+    runs-on: self-hosted
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: partsunlimited-build
+        path: ${{ github.workspace }}\artifacts
+    
+    - name: Stop IIS Application Pool
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        if (Test-Path "IIS:\AppPools\${{ env.IIS_APP_POOL }}") {
+          Stop-WebAppPool -Name "${{ env.IIS_APP_POOL }}"
+          Start-Sleep -Seconds 5
+          
+          # Wait for app pool to stop
+          $count = 0
+          while ((Get-WebAppPoolState -Name "${{ env.IIS_APP_POOL }}").Value -ne "Stopped" -and $count -lt 30) {
+            Start-Sleep -Seconds 1
+            $count++
+          }
+          Write-Host "Application pool stopped"
+        }
+    
+    - name: Backup current deployment
+      shell: powershell
+      run: |
+        $backupPath = "${{ env.DEPLOYMENT_PATH }}_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        if (Test-Path "${{ env.DEPLOYMENT_PATH }}") {
+          Copy-Item -Path "${{ env.DEPLOYMENT_PATH }}" -Destination $backupPath -Recurse -Force
+          Write-Host "Backup created at: $backupPath"
+          
+          # Keep only last 5 backups
+          Get-ChildItem -Path "C:\inetpub\wwwroot" -Filter "PartsUnlimited_backup_*" -Directory | 
+            Sort-Object CreationTime -Descending | 
+            Select-Object -Skip 5 | 
+            Remove-Item -Recurse -Force
+        }
+    
+    - name: Clear deployment directory
+      shell: powershell
+      run: |
+        if (Test-Path "${{ env.DEPLOYMENT_PATH }}") {
+          # Remove all files except Web.config if you want to preserve it
+          Get-ChildItem -Path "${{ env.DEPLOYMENT_PATH }}" -Recurse | Remove-Item -Force -Recurse
+          Write-Host "Deployment directory cleared"
+        } else {
+          New-Item -ItemType Directory -Path "${{ env.DEPLOYMENT_PATH }}" -Force
+          Write-Host "Deployment directory created"
+        }
+    
+    - name: Copy files to IIS
+      shell: powershell
+      run: |
+        Copy-Item -Path "${{ github.workspace }}\artifacts\*" -Destination "${{ env.DEPLOYMENT_PATH }}" -Recurse -Force
+        Write-Host "Files copied to deployment directory"
+    
+    - name: Configure IIS Application Pool
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        
+        # Create app pool if it doesn't exist
+        if (-not (Test-Path "IIS:\AppPools\${{ env.IIS_APP_POOL }}")) {
+          New-WebAppPool -Name "${{ env.IIS_APP_POOL }}"
+          Write-Host "Application pool created"
+        }
+        
+        # Configure app pool settings
+        Set-ItemProperty "IIS:\AppPools\${{ env.IIS_APP_POOL }}" -Name "managedRuntimeVersion" -Value "v4.0"
+        Set-ItemProperty "IIS:\AppPools\${{ env.IIS_APP_POOL }}" -Name "managedPipelineMode" -Value "Integrated"
+        Set-ItemProperty "IIS:\AppPools\${{ env.IIS_APP_POOL }}" -Name "enable32BitAppOnWin64" -Value $false
+        Set-ItemProperty "IIS:\AppPools\${{ env.IIS_APP_POOL }}" -Name "processModel.identityType" -Value "ApplicationPoolIdentity"
+        
+        Write-Host "Application pool configured"
+    
+    - name: Configure IIS Website
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        
+        # Create website if it doesn't exist
+        if (-not (Test-Path "IIS:\Sites\${{ env.IIS_SITE_NAME }}")) {
+          New-Website -Name "${{ env.IIS_SITE_NAME }}" `
+            -PhysicalPath "${{ env.DEPLOYMENT_PATH }}" `
+            -ApplicationPool "${{ env.IIS_APP_POOL }}" `
+            -Port ${{ env.IIS_PORT }}
+          Write-Host "Website created"
+        } else {
+          # Update existing website
+          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" -Name "physicalPath" -Value "${{ env.DEPLOYMENT_PATH }}"
+          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" -Name "applicationPool" -Value "${{ env.IIS_APP_POOL }}"
+          
+          # Update binding
+          $binding = Get-WebBinding -Name "${{ env.IIS_SITE_NAME }}" -Port ${{ env.IIS_PORT }}
+          if ($null -eq $binding) {
+            New-WebBinding -Name "${{ env.IIS_SITE_NAME }}" -Protocol "http" -Port ${{ env.IIS_PORT }} -IPAddress "*"
+          }
+          
+          Write-Host "Website updated"
+        }
+    
+    - name: Set folder permissions
+      shell: powershell
+      run: |
+        $acl = Get-Acl "${{ env.DEPLOYMENT_PATH }}"
+        $permission = "IIS AppPool\${{ env.IIS_APP_POOL }}","ReadAndExecute","ContainerInherit,ObjectInherit","None","Allow"
+        $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule $permission
+        $acl.SetAccessRule($accessRule)
+        Set-Acl "${{ env.DEPLOYMENT_PATH }}" $acl
+        Write-Host "Permissions set for application pool identity"
+    
+    - name: Start IIS Application Pool
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        Start-WebAppPool -Name "${{ env.IIS_APP_POOL }}"
+        
+        # Wait for app pool to start
+        $count = 0
+        while ((Get-WebAppPoolState -Name "${{ env.IIS_APP_POOL }}").Value -ne "Started" -and $count -lt 30) {
+          Start-Sleep -Seconds 1
+          $count++
+        }
+        Write-Host "Application pool started"
+    
+    - name: Start IIS Website
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        Start-Website -Name "${{ env.IIS_SITE_NAME }}"
+        Write-Host "Website started"
+    
+    - name: Warm up application
+      shell: powershell
+      run: |
+        Start-Sleep -Seconds 5
+        try {
+          $response = Invoke-WebRequest -Uri "http://localhost:${{ env.IIS_PORT }}" -UseBasicParsing -TimeoutSec 30
+          Write-Host "Application warmed up. Status: $($response.StatusCode)"
+        } catch {
+          Write-Warning "Failed to warm up application: $_"
+        }
+    
+    - name: Verify deployment
+      shell: powershell
+      run: |
+        Import-Module WebAdministration
+        
+        $appPoolState = (Get-WebAppPoolState -Name "${{ env.IIS_APP_POOL }}").Value
+        $websiteState = (Get-Website -Name "${{ env.IIS_SITE_NAME }}").State
+        
+        Write-Host "Application Pool State: $appPoolState"
+        Write-Host "Website State: $websiteState"
+        
+        if ($appPoolState -eq "Started" -and $websiteState -eq "Started") {
+          Write-Host "✓ Deployment successful!"
+          Write-Host "Application URL: http://localhost:${{ env.IIS_PORT }}"
+        } else {
+          Write-Error "Deployment verification failed!"
+          exit 1
+        }
+    
+    - name: Cleanup old artifacts
+      uses: geekyeggo/delete-artifact@v4
+      if: always()
+      with:
+        name: partsunlimited-build
