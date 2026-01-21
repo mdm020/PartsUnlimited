@@ -7,7 +7,7 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build:
+  build-test-artifact:
     runs-on: windows-latest
 
     steps:
@@ -25,3 +25,21 @@ jobs:
 
       - name: Build solution
         run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /m
+
+      - name: Run Unit Tests
+        run: |
+          vstest.console.exe `
+            **\bin\Release\*UnitTests.dll `
+            **\bin\Release\*Tests.dll `
+            /Platform:x64
+
+      - name: Prepare artifacts
+        run: |
+          mkdir artifact
+          xcopy /s /y src\PartsUnlimitedWebsite\bin\Release artifact\
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-Build
+          path: artifact
