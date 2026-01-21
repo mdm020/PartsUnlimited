@@ -136,5 +136,5 @@ jobs:
         Write-Host "Site Name: ${{ vars.IIS_SITE_NAME || 'PartsUnlimited' }}"
         Write-Host "App Pool:  ${{ vars.IIS_APP_POOL_NAME || 'PartsUnlimitedAppPool' }}"
         Write-Host "Physical Path: ${{ vars. IIS_PHYSICAL_PATH || 'C:\inetpub\wwwroot\PartsUnlimited' }}"
-        Write-Host "Port: ${{ vars.IIS_PORT || '8085' }}"
+        Write-Host "Port: ${{ vars.IIS_PORT || '8080' }}"
         Write-Host "======================================"
