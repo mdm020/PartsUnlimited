@@ -27,7 +27,17 @@ jobs:
       run: nuget restore PartsUnlimited.sln
       
     - name: Build solution
-      run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /p:DeployOnBuild=false /p:VisualStudioVersion=16.0 /m /v:minimal
+      run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /p:DeployOnBuild=false /p:VisualStudioVersion=17.0 /m /v:minimal
+      
+    - name: List build output
+      run: |
+        Write-Host "Checking build output..."
+        if (Test-Path "test\PartsUnlimited.UnitTests\bin\Release") {
+          Get-ChildItem "test\PartsUnlimited.UnitTests\bin\Release" -Recurse | Select-Object FullName
+        } else {
+          Write-Host "Release folder not found!"
+        }
+      continue-on-error: true
       
     - name: Run Unit Tests
       run: vstest.console.exe test\PartsUnlimited.UnitTests\bin\Release\PartsUnlimited.UnitTests.dll /Logger:trx
