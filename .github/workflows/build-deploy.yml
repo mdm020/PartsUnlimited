@@ -85,10 +85,13 @@ jobs:
         $site = "MyDotNetApp"
         $path = "C:\inetpub\wwwroot\PartsUnlimited"
         
-        # Stop app pool safely
+        # Stop app pool SAFELY - check state first
         if (Test-Path "IIS:\AppPools\$appPool") {
-          Stop-WebAppPool $appPool -ErrorAction SilentlyContinue
-          Start-Sleep 3
+          $state = (Get-WebAppPoolState -Name $appPool).Value
+          if ($state -ne "Stopped") {
+            Stop-WebAppPool $appPool
+            Start-Sleep 3
+          }
         }
         
         # Copy files (overwrite)
