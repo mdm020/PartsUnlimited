@@ -1,165 +1,136 @@
-name: CI Build and Test
+name: Deploy .NET App to IIS
 
 on:
   push:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch: # Allow manual triggers
+
+env:
+  DOTNET_VERSION: '8.0.x' # or '7.0.x', '6.0.x' based on your app
+  PROJECT_PATH: 'src/YourProject.csproj' # Update with your project path
+  PUBLISH_PATH: './publish'
+  APP_NAME: 'PartsUnlimited'
+  IIS_SITE_NAME: 'PartsUnlimited'
+  APP_POOL: 'PartsUnlimitedAppPool'
+  DEPLOY_PATH: 'C:\inetpub\wwwroot\PartsUnlimited'
+  PORT: '8080'
 
 jobs:
-  build-test-artifact:
+  build:
     runs-on: windows-latest
-
-    steps:
-      # Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Setup NuGet and restore packages
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
-
-      - name: Restore NuGet packages
-        run: nuget restore PartsUnlimited.sln
-
-      # Setup MSBuild
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      # Build solution & publish website
-      - name: Build & Publish Website
-        run: |
-          # Build the web project and publish to artifact folder
-          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=..\..\artifact `
-            /p:DeployTarget=WebPublish
-
-      # Build test projects
-      - name: Build Test Projects
-        run: |
-          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU
-        continue-on-error: true
-
-      # Run MSTest unit tests
-      - name: Run Unit Tests
-        shell: pwsh
-        run: |
-          # Locate vstest.console.exe dynamically
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
-            Select-Object -First 1
-
-          Write-Host "Using vstest: $vstest"
-
-          # Find and run unit test DLLs
-          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
-            Where-Object { $_.FullName -like "*\bin\Release\*" } |
-            Select-Object -ExpandProperty FullName
-
-          if ($testDlls) {
-            Write-Host "Found test DLLs:"
-            $testDlls | ForEach-Object { Write-Host "  $_" }
-            & "$vstest" $testDlls /Platform:x64 /Logger:trx
-          } else {
-            Write-Host "No test DLLs found"
-          }
-        continue-on-error: true
-
-      # List artifact contents
-      - name: List artifact folder contents
-        run: |
-          if (Test-Path "artifact") {
-            Write-Host "Artifact folder contents:"
-            Get-ChildItem artifact -Recurse | Select-Object FullName
-          } else {
-            Write-Host "Artifact folder not found"
-          }
-
-      # Upload build artifacts
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: PartsUnlimited-Web
-          path: artifact
-
-  deploy:
-    needs: build-test-artifact
-    runs-on: self-hosted
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
-      # Checkout repository to get deployment script
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      # Download build artifacts
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: ./artifacts
-      
-      # Display artifact structure
-      - name: Display artifact structure
-        run: |
-          Write-Host "========================================" -ForegroundColor Cyan
-          Write-Host "Artifact Contents" -ForegroundColor Cyan
-          Write-Host "========================================" -ForegroundColor Cyan
-          Get-ChildItem -Path ./artifacts -Recurse | Select-Object FullName
-          Write-Host ""
-      
-      # Deploy to IIS
-      - name: Deploy to IIS
-        shell: powershell
-        run: |
-          Import-Module WebAdministration
-          
-          # Create app pool if doesn't exist
-          if (-not (Test-Path "IIS:\AppPools\$env:IIS_APP_POOL_NAME")) {
-            New-WebAppPool -Name $env:IIS_APP_POOL_NAME
-            Write-Host "Created app pool"
-          }
-          
-          # Create website if doesn't exist
-          if (-not (Test-Path "IIS:\Sites\$env:IIS_SITE_NAME")) {
-            New-Item -Path "IIS:\Sites\$env:IIS_SITE_NAME" -Bindings @{protocol="http";bindingInformation="*:8080:"} -PhysicalPath $env:IIS_PHYSICAL_PATH
-            Set-ItemProperty "IIS:\Sites\$env:IIS_SITE_NAME" -Name applicationPool -Value $env:IIS_APP_POOL_NAME
-            Write-Host "Created website"
-          }
-          
-          # Stop app pool to release files
-          Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 3
-          
-          # Copy files to IIS directory
-          Copy-Item -Path ".\artifacts\*" -Destination $env:IIS_PHYSICAL_PATH -Recurse -Force
-          
-          # Start app pool and website
-          Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
-          Start-Website -Name $env:IIS_SITE_NAME
-          
-          Write-Host "Deployed successfully to http://localhost:8080"
-        env:
-          IIS_SITE_NAME: PartsUnlimited
-          IIS_APP_POOL_NAME: PartsUnlimitedAppPool
-          IIS_PHYSICAL_PATH: C:\inetpub\wwwroot\PartsUnlimited
-      
-      # Verify deployment
-      - name: Verify deployment
-        shell: powershell
-        run: |
-          Import-Module WebAdministration
-          $status = Get-WebAppPoolState -Name $env:IIS_APP_POOL_NAME
-          Write-Host "App Pool: $($status.Value)"
-          $site = Get-Website -Name $env:IIS_SITE_NAME
-          Write-Host "Website: $($site.State)"
-        env:
-          IIS_SITE_NAME: PartsUnlimited
-          IIS_APP_POOL_NAME: PartsUnlimitedAppPool
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup .NET Core
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: ${{ env.DOTNET_VERSION }}
+    
+    - name: Restore dependencies
+      run: dotnet restore ${{ env.PROJECT_PATH }}
+    
+    - name: Build
+      run: dotnet build ${{ env.PROJECT_PATH }} --configuration Release --no-restore
+    
+    - name: Test
+      run: dotnet test ${{ env.PROJECT_PATH }} --configuration Release --no-build --verbosity normal
+    
+    - name: Publish
+      run: dotnet publish ${{ env.PROJECT_PATH }} --configuration Release --output ${{ env.PUBLISH_PATH }} --runtime win-x64 --self-contained false
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-publish
+        path: ${{ env.PUBLISH_PATH }}
+        retention-days: 5
+
+  deploy:
+    runs-on: windows-latest
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: app-publish
+        path: ${{ env.PUBLISH_PATH }}
+    
+    - name: Display directory structure
+      run: |
+        Get-ChildItem -Path ${{ env.PUBLISH_PATH }} -Recurse | Select-Object -First 20
+    
+    - name: Deploy to IIS
+      shell: pwsh
+      run: |
+        # Stop the application pool and site
+        Stop-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
+        Stop-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
+        
+        # Check if directory exists, if not create it
+        if (!(Test-Path -Path "${{ env.DEPLOY_PATH }}")) {
+          New-Item -Path "${{ env.DEPLOY_PATH }}" -ItemType Directory
+          Write-Host "Created directory: ${{ env.DEPLOY_PATH }}"
+        }
+        
+        # Clean the target directory
+        Remove-Item -Path "${{ env.DEPLOY_PATH }}\*" -Recurse -Force -ErrorAction SilentlyContinue
+        
+        # Copy new files
+        Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination "${{ env.DEPLOY_PATH }}" -Recurse -Force
+        
+        # Ensure web.config exists
+        if (!(Test-Path -Path "${{ env.DEPLOY_PATH }}\web.config")) {
+          # Create a minimal web.config if missing
+          $webConfig = @"
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <location path="." inheritInChildApplications="false">
+    <system.webServer>
+      <handlers>
+        <add name="aspNetCore" path="*" verb="*" modules="AspNetCoreModuleV2" resourceType="Unspecified" />
+      </handlers>
+      <aspNetCore processPath="dotnet" arguments=".\${{ env.APP_NAME }}.dll" stdoutLogEnabled="false" stdoutLogFile=".\logs\stdout" hostingModel="inprocess" />
+    </system.webServer>
+  </location>
+</configuration>
+"@
+          $webConfig | Out-File -FilePath "${{ env.DEPLOY_PATH }}\web.config" -Encoding UTF8
+        }
+        
+        # Configure IIS if needed
+        $siteExists = Get-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
+        
+        if (!$siteExists) {
+          # Create new website
+          New-Website -Name "${{ env.IIS_SITE_NAME }}" -Port ${{ env.PORT }} -PhysicalPath "${{ env.DEPLOY_PATH }}" -ApplicationPool "${{ env.APP_POOL }}"
+          Write-Host "Created new website: ${{ env.IIS_SITE_NAME }}"
+        } else {
+          # Update existing website
+          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" -Name physicalPath -Value "${{ env.DEPLOY_PATH }}"
+          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" -Name bindings -Value @{protocol="http";bindingInformation="*:${{ env.PORT }}:"}
+        }
+        
+        # Ensure application pool exists
+        $poolExists = Get-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
+        
+        if (!$poolExists) {
+          New-WebAppPool -Name "${{ env.APP_POOL }}"
+          Write-Host "Created new application pool: ${{ env.APP_POOL }}"
+        }
+        
+        # Set application pool to .NET CLR v4.0
+        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" -Name managedRuntimeVersion -Value "v4.0"
+        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" -Name processModel.identityType -Value "ApplicationPoolIdentity"
+        
+        # Start application pool and site
+        Start-WebAppPool -Name "${{ env.APP_POOL }}"
+        Start-Website -Name "${{ env.IIS_SITE_NAME }}"
+        
+        Write-Host "Deployment completed successfully!"
+        Write-Host "Site URL: http://localhost:${{ env.PORT }}"
