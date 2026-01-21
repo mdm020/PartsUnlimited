@@ -7,39 +7,58 @@ on:
     branches: [ main, master ]
 
 jobs:
-  ci:
+  build-test-artifact:
     runs-on: windows-latest
 
     steps:
+      # 1️⃣ Checkout source code
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2️⃣ Setup NuGet and restore packages
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
       - name: Restore NuGet packages
         run: nuget restore PartsUnlimited.sln
 
+      # 3️⃣ Setup MSBuild
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build & Publish Web App
+      # 4️⃣ Build & publish web project
+      - name: Build & Publish Website
         run: |
-          msbuild PartsUnlimited.sln `
+          # Ensure artifact folder exists
+          mkdir artifact
+
+          # Build & publish only the website project (classic ASP.NET Web App)
+          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
             /p:Configuration=Release `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
             /p:PublishUrl=artifact `
             /p:Platform="Any CPU"
 
-      - name: Run Unit Tests
+      # 5️⃣ Run MSTest unit tests (exclude Selenium/UI tests)
+      - name: Run Unit Tests (MSTest)
         shell: pwsh
         run: |
+          # Locate vstest.console.exe dynamically
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
             Select-Object -First 1
+
+          Write-Host "Using vstest: $vstest"
+
+          # Run all unit test DLLs in the solution (bin/Release)
           & "$vstest" **\bin\Release\*UnitTests.dll /Platform:x64
 
+      # 6️⃣ Verify artifact folder (debugging)
+      - name: List artifact folder contents
+        run: dir artifact
+
+      # 7️⃣ Upload artifacts to GitHub Actions
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
