@@ -2,77 +2,78 @@ name: CD - Deploy to IIS
 
 on:
   workflow_run:
-    workflows: ["CI Build and Test"]
+    workflows: ["CI Build and Test"]   # Name of your CI workflow
     types:
       - completed
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: self-hosted
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v2
-      
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v2
-      
-    - name: Restore NuGet packages
-      run: nuget restore PartsUnlimited.sln
-      
-    - name: Build solution for deployment
-      run: msbuild src/PartsUnlimitedWebsite/PartsUnlimitedWebsite.csproj /p:Configuration=Release /p:DeployOnBuild=true /p:PublishProfile=FolderProfile /p:OutputPath=bin\Release\ /p:WebPublishMethod=FileSystem /p:publishUrl=publish
-      
-    - name: Stop IIS Application Pool
-      run: |
-        Import-Module WebAdministration
-        Stop-WebAppPool -Name "${{ secrets.IIS_APP_POOL_NAME }}"
-        Start-Sleep -Seconds 5
-      continue-on-error: true
-      
-    - name: Deploy to IIS
-      run: |
-        $source = "src\PartsUnlimitedWebsite\publish\*"
-        $destination = "${{ secrets.IIS_SITE_PATH }}"
-        
-        Write-Host "Deploying from: $source"
-        Write-Host "Deploying to: $destination"
-        
-        # Backup existing deployment (optional)
-        if (Test-Path $destination) {
-          $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-          Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
-          Write-Host "Backup created at: $backupPath"
-        }
-        
-        # Copy files to IIS directory
-        Copy-Item -Path $source -Destination $destination -Recurse -Force
-        Write-Host "Deployment completed successfully"
-      
-    - name: Start IIS Application Pool
-      run: |
-        Import-Module WebAdministration
-        Start-WebAppPool -Name "${{ secrets.IIS_APP_POOL_NAME }}"
-        Start-Sleep -Seconds 5
-      
-    - name: Verify deployment
-      run: |
-        $url = "${{ secrets.IIS_SITE_URL }}"
-        Write-Host "Checking website: $url"
-        try {
-          $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
-          if ($response.StatusCode -eq 200) {
-            Write-Host "✅ Website is responding successfully"
-          } else {
-            Write-Warning "⚠️ Website returned status code: $($response.StatusCode)"
+      # 1️⃣ Checkout (required for runner context)
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2️⃣ Download CI artifact
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
+
+      # 3️⃣ Stop IIS app pool (optional: graceful stop)
+      - name: Stop IIS Application Pool
+        shell: pwsh
+        run: |
+          Import-Module WebAdministration
+          Stop-WebAppPool -Name "${{ secrets.IIS_APP_POOL_NAME }}"
+          Start-Sleep -Seconds 5
+
+      # 4️⃣ Deploy files to IIS site
+      - name: Deploy to IIS
+        shell: pwsh
+        run: |
+          $source = "artifact\*"
+          $destination = "${{ secrets.IIS_SITE_PATH }}"
+          Write-Host "Deploying from: $source"
+          Write-Host "Deploying to: $destination"
+
+          # Optional backup of existing site
+          if (Test-Path $destination) {
+              $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+              Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
+              Write-Host "Backup created at: $backupPath"
           }
-        } catch {
-          Write-Error "❌ Website check failed: $_"
-          exit 1
-        }
+
+          # Copy new build files to IIS site
+          Copy-Item -Path $source -Destination $destination -Recurse -Force
+          Write-Host "✅ Deployment completed successfully"
+
+      # 5️⃣ Start IIS app pool
+      - name: Start IIS Application Pool
+        shell: pwsh
+        run: |
+          Import-Module WebAdministration
+          Start-WebAppPool -Name "${{ secrets.IIS_APP_POOL_NAME }}"
+          Start-Sleep -Seconds 5
+
+      # 6️⃣ Verify deployment
+      - name: Verify deployment
+        shell: pwsh
+        run: |
+          $url = "${{ secrets.IIS_SITE_URL }}"
+          Write-Host "Checking website: $url"
+          try {
+              $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
+              if ($response.StatusCode -eq 200) {
+                  Write-Host "✅ Website is responding successfully"
+              } else {
+                  Write-Warning "⚠️ Website returned status code: $($response.StatusCode)"
+              }
+          } catch {
+              Write-Error "❌ Website check failed: $_"
+              exit 1
+          }
