@@ -2,7 +2,7 @@ name: CD - Deploy to IIS
 
 on:
   workflow_run:
-    workflows: [".NET Framework CI"]   # Replace with your CI workflow name
+    workflows: ["CI - Build and Test"]   # Replace with your CI workflow name
     types:
       - completed
   workflow_dispatch:  # Manual trigger
