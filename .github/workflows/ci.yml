@@ -27,7 +27,7 @@ jobs:
         run: msbuild PartsUnlimited.sln /p:Configuration=Release /p:Platform="Any CPU" /m
 
       - name: Run Unit Tests
-        uses: microsoft/vstest-action@v1
+        uses: microsoft/vstest-action@v1.2.0
         with:
           testAssemblyVer2: |
             **\bin\Release\*UnitTests.dll
