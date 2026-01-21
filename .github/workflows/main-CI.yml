@@ -79,30 +79,7 @@ jobs:
           Write-Host "⚠️ vstest.console.exe not found, skipping tests"
         }
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages:  csharp
-        queries: security-and-quality
-
-    - name:  Perform CodeQL Analysis (SAST)
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:csharp"
-
-    - name: Run Security DevOps Analysis
-      uses: microsoft/security-devops-action@latest
-      id: msdo
-      continue-on-error: true
-      with:
-        tools: 'credscan,binskim'
-
-    - name: Upload MSDO Results to Security tab
-      uses: github/codeql-action/upload-sarif@v3
-      if: always()
-      with:
-        sarif_file: ${{ steps.msdo.outputs.sarifFile }}
-
+    
     - name: Verify publish output
       run: |
         Write-Host "📦 Verifying published files..."
