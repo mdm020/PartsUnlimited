@@ -1,4 +1,4 @@
-name: .NET Framework CI
+name: CI - Build and Test
 
 on:
   push:
@@ -7,62 +7,40 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-test-artifact:
+  build:
     runs-on: windows-latest
 
     steps:
-      # 1️⃣ Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      # 2️⃣ Setup NuGet and restore packages
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v1
 
-      - name: Restore NuGet packages
-        run: nuget restore PartsUnlimited.sln
+    - name: Restore NuGet packages
+      run: nuget restore PartsUnlimited.sln
 
-      # 3️⃣ Setup MSBuild
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v1
 
-      # 4️⃣ Build solution & publish website
-      - name: Build & Publish Website
-        run: |
-          # Ensure artifact folder exists
-          mkdir artifact
+    - name: Build solution (Release)
+      run: msbuild PartsUnlimited.sln /p:Configuration=Release /m
 
-          # Build the solution and publish the web project
-          msbuild PartsUnlimited.sln `
-            /p:Configuration=Release `
-            /p:Platform="Any CPU" `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=artifact `
-            /p:DeployTarget=WebPublish `
-            /p:OutDir=artifact\
-
-      # 5️⃣ Run MSTest unit tests (exclude Selenium/UI tests)
-      - name: Run Unit Tests
-        shell: pwsh
-        run: |
-          # Locate vstest.console.exe dynamically
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
-            Select-Object -First 1
-
-          Write-Host "Using vstest: $vstest"
-
-          # Run all unit test DLLs in the solution (bin/Release)
-          & "$vstest" **\bin\Release\*UnitTests.dll /Platform:x64
-
-      # 6️⃣ Debug: List artifact contents
-      - name: List artifact folder contents
-        run: dir artifact
-
-      # 7️⃣ Upload build artifacts
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: artifact
+    - name: Run unit tests
+      run: |
+        # Find test assemblies and run with vstest.console.exe
+        $testExe = 'vstest.console.exe'
+        $vsWhere = "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe"
+        if (Test-Path $vsWhere) {
+          $vsPath = & $vsWhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath | Select-Object -First 1
+          $vstest = Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\TestWindow\vstest.console.exe'
+          if (Test-Path $vstest) { $testExe = $vstest }
+        }
+        Get-ChildItem -Path . -Recurse -Filter '*PartsUnlimited.UnitTests*.dll' | ForEach-Object { & $testExe $_.FullName }
+    - name: Publish build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: partsunlimited-build
+        path: |
+          src/**/bin/Release
+          src/**/bin
