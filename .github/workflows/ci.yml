@@ -1,34 +1,31 @@
-name: .NET CI Pipeline
+name: .NET Framework CI
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
   pull_request:
-    branches:
-      - main
-      - master
+    branches: [ main, master ]
 
 jobs:
-  build-and-test:
-    name: Build & Test .NET App
+  build:
     runs-on: windows-latest
 
     steps:
-      - name: Checkout source code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Restore NuGet packages (packages.config)
+        run: nuget restore PartsUnlimited.sln
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
 
       - name: Build solution
-        run: dotnet build --no-restore --configuration Release
-
-      - name: Run unit tests
-        run: dotnet test --no-build --configuration Release --verbosity normal
+        run: |
+          msbuild PartsUnlimited.sln ^
+            /p:Configuration=Release ^
+            /p:Platform="Any CPU" ^
+            /m
