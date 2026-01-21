@@ -1,23 +1,30 @@
 name: CD - Deploy to IIS
 
-# Trigger manually or after CI workflow completes
+# Trigger manually or automatically after CI
 on:
   workflow_run:
     workflows: [".NET Framework CI"]   # EXACT name of your CI workflow
     types:
       - completed
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:  # allows manual run
 
 jobs:
   deploy:
     runs-on: self-hosted
+
+    # Only run on main/master or manual trigger
     if: >
-      github.event_name == 'workflow_dispatch' || 
+      github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        (github.event.workflow_run.head_branch == 'main' || github.event.workflow_run.head_branch == 'master'))
 
+    env:
+      IIS_APP_POOL_NAME: ${{ secrets.IIS_APP_POOL_NAME }}
+      IIS_SITE_PATH: ${{ secrets.IIS_SITE_PATH }}
+      IIS_SITE_URL: ${{ secrets.IIS_SITE_URL }}
+
     steps:
-      # 1️⃣ Checkout repository
+      # 1️⃣ Checkout repo (needed for context)
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -25,10 +32,19 @@ jobs:
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
-          name: PartsUnlimited-Web
+          name: partsunlimited-build   # <-- must match CI artifact name
           path: artifact
 
-      # 3️⃣ Stop IIS Application Pool
+      # 3️⃣ Fail gracefully if artifact missing
+      - name: Check artifact exists
+        shell: powershell
+        run: |
+          if (-not (Test-Path "artifact")) {
+              Write-Error "Artifact folder not found! Ensure CI workflow ran successfully."
+              exit 1
+          }
+
+      # 4️⃣ Stop IIS App Pool
       - name: Stop IIS Application Pool
         shell: powershell
         run: |
@@ -37,29 +53,29 @@ jobs:
           Stop-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
-      # 4️⃣ Backup existing IIS site (optional)
+      # 5️⃣ Backup existing IIS site (optional)
       - name: Backup existing IIS site
         shell: powershell
         run: |
-          $destination = "${{ secrets.IIS_SITE_PATH }}"
+          $destination = $env:IIS_SITE_PATH
           if (Test-Path $destination) {
               $backupPath = "$destination-backup-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
               Copy-Item -Path $destination -Destination $backupPath -Recurse -Force
               Write-Host "Backup created at: $backupPath"
           }
 
-      # 5️⃣ Deploy artifact to IIS
+      # 6️⃣ Deploy artifact to IIS
       - name: Deploy to IIS
         shell: powershell
         run: |
           $source = "artifact\*"
-          $destination = "${{ secrets.IIS_SITE_PATH }}"
+          $destination = $env:IIS_SITE_PATH
           Write-Host "Deploying from: $source"
           Write-Host "Deploying to: $destination"
           Copy-Item -Path $source -Destination $destination -Recurse -Force
           Write-Host "✅ Deployment completed successfully"
 
-      # 6️⃣ Start IIS Application Pool
+      # 7️⃣ Start IIS App Pool
       - name: Start IIS Application Pool
         shell: powershell
         run: |
@@ -68,11 +84,11 @@ jobs:
           Start-WebAppPool -Name $env:IIS_APP_POOL_NAME
           Start-Sleep -Seconds 5
 
-      # 7️⃣ Verify website is responding
+      # 8️⃣ Verify website is responding
       - name: Verify deployment
         shell: powershell
         run: |
-          $url = "${{ secrets.IIS_SITE_URL }}"
+          $url = $env:IIS_SITE_URL
           Write-Host "Checking website: $url"
           try {
               $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 30
