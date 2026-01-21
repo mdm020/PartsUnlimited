@@ -57,3 +57,44 @@ jobs:
         }
 
         & $vsTestPath $testDlls.FullName /Platform:x64
+deploy:
+  name: Deploy to IIS
+  needs: build-and-test
+  runs-on: self-hosted
+  if: github.ref == 'refs/heads/master'
+
+  steps:
+  - name: Download artifacts
+    uses: actions/download-artifact@v4
+    with:
+      name: partsunlimited-build
+      path: C:\temp\deploy
+
+  - name: Deploy to IIS
+    shell: powershell
+    run: |
+      Import-Module WebAdministration
+      
+      $appPool = "PartsUnlimitedAppPool"
+      $site = "MyDotNetApp"
+      $path = "C:\inetpub\wwwroot\PartsUnlimited"
+      
+      # Stop app pool safely
+      if (Test-Path "IIS:\AppPools\$appPool") {
+        Stop-WebAppPool $appPool -ErrorAction SilentlyContinue
+        Start-Sleep 3
+      }
+      
+      # Copy files (overwrite)
+      if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+      Copy-Item "C:\temp\deploy\*" $path -Recurse -Force
+      
+      # Start app pool & site
+      if (-not (Test-Path "IIS:\AppPools\$appPool")) {
+        New-WebAppPool $appPool
+        Set-ItemProperty "IIS:\AppPools\$appPool" "managedRuntimeVersion" "v4.0"
+      }
+      Start-WebAppPool $appPool
+      Start-Website $site -ErrorAction SilentlyContinue
+      
+      Write-Host "Deployed to http://localhost:8080"
