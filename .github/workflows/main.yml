@@ -32,29 +32,21 @@ jobs:
             /p:PublishUrl="..\..\artifact" `
             /p:DeployTarget=WebPublish
 
-      # Deploy step with new IIS configuration
-      - name: Deploy to IIS
+      # Deploy step - NO IIS MODULES
+      - name: Copy to IIS Path
         shell: pwsh
         run: |
-          # IIS Configuration
-          $siteName = "MyDotNetApp"
           $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
-          $sitePort = 8089
           
-          Write-Host "Starting deployment..."
-          Write-Host "IIS Site: $siteName"
-          Write-Host "Port: $sitePort"
-          Write-Host "Path: $sitePath"
+          Write-Host "Copying files to: $sitePath"
           
-          # Ensure directory exists
+          # Create directory if needed
           if (!(Test-Path $sitePath)) {
               New-Item -ItemType Directory -Path $sitePath -Force
-              Write-Host "Created directory: $sitePath"
           }
           
-          # Copy build artifacts
-          Write-Host "Copying files from artifact folder..."
+          # Simple file copy
           Copy-Item -Path ".\artifact\*" -Destination $sitePath -Recurse -Force
           
-          Write-Host "✅ Deployment completed!"
-          Write-Host "🌐 Application available at: http://localhost:$sitePort"
+          Write-Host "✅ Deployment complete"
+          Write-Host "🌐 http://localhost:8089"
