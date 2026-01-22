@@ -779,7 +779,13 @@ if (typeof jQuery === 'undefined') {
       selector = selector && /#[A-Za-z]/.test(selector) && selector.replace(/.*(?=#[^\s]*$)/, '') // strip for ie7
     }
 
-    var $parent = selector && $(selector)
+    var $parent = null
+    if (selector && typeof selector === 'string' && selector.charAt(0) === '#') {
+      var parentElement = document.getElementById(selector.slice(1))
+      if (parentElement) {
+        $parent = $(parentElement)
+      }
+    }
 
     return $parent && $parent.length ? $parent : $this.parent()
   }
