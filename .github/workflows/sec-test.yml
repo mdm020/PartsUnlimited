@@ -1,233 +1,160 @@
-name: Build and Deploy ASP.NET Framework App to IIS
+name: CI Build and Deploy
 
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:
+  pull_request:
+    branches: [ main, master ]
 
-env:
-  BUILD_CONFIGURATION: 'Release'
-  PUBLISH_PATH: './publish'
-  IIS_SITE_NAME: 'PartsUnlimited'
-  APP_POOL: 'PartsUnlimitedAppPool'
-  DEPLOY_PATH: 'C:\inetpub\wwwroot\PartsUnlimited'
-  PORT: '8080'
+# CodeQL runs in parallel with build
+permissions:
+  contents: read
+  security-events: write
 
 jobs:
-  build-and-deploy:
+  # CodeQL Security Analysis
+  analyze:
+    name: Analyze with CodeQL
     runs-on: windows-latest
     
     steps:
-    # Checkout code
     - name: Checkout repository
       uses: actions/checkout@v4
-      
-    # Setup MSBuild (for ASP.NET Framework)
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v1.1
-      
-    # Setup NuGet
-    - name: Setup NuGet
-      uses: NuGet/setup-nuget@v1
-      
-    # Restore NuGet packages
-    - name: Restore NuGet packages
-      run: |
-        nuget restore PartsUnlimited.sln
-        # OR if you have a packages.config file
-        nuget restore src/PartsUnlimitedWebsite/packages.config -PackagesDirectory ./packages
-      
-    # Build the solution with MSBuild
-    - name: Build Solution
-      run: |
-        msbuild PartsUnlimited.sln `
-          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
-          /p:DeployOnBuild=true `
-          /p:PublishProfile=FolderProfile `
-          /p:VisualStudioVersion=17.0 `
-          /p:VSToolsPath="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0" `
-          /p:WebPublishMethod=FileSystem `
-          /p:DeleteExistingFiles=True `
-          /p:publishUrl=${{ env.PUBLISH_PATH }} `
-          /verbosity:minimal
-      
-    # Alternative: Direct MSBuild for web project
-    - name: Build Web Project
-      shell: pwsh
-      run: |
-        $msbuildPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
-        
-        & $msbuildPath "src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj" `
-          /p:Configuration=${{ env.BUILD_CONFIGURATION }} `
-          /p:DeployOnBuild=true `
-          /p:PublishProfile=FolderProfile `
-          /p:Platform="AnyCPU" `
-          /p:VisualStudioVersion=17.0 `
-          /p:VSToolsPath="C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Microsoft\VisualStudio\v17.0" `
-          /p:WebPublishMethod=FileSystem `
-          /p:DeleteExistingFiles=True `
-          /p:publishUrl=${{ env.PUBLISH_PATH }} `
-          /verbosity:minimal
-          
-        # Check if publish was successful
-        if (Test-Path "${{ env.PUBLISH_PATH }}") {
-          Write-Host "✅ Build successful. Files published to: ${{ env.PUBLISH_PATH }}"
-          Get-ChildItem -Path "${{ env.PUBLISH_PATH }}" | Select-Object -First 10
-        }
-      
-    # Manual publish if MSBuild fails
-    - name: Manual Publish (Fallback)
-      if: failure()
-      shell: pwsh
-      run: |
-        Write-Host "Attempting manual publish..."
-        
-        # Create publish directory
-        New-Item -Path "${{ env.PUBLISH_PATH }}" -ItemType Directory -Force
-        
-        # Copy web files manually (adjust paths as needed)
-        Copy-Item -Path "src\PartsUnlimitedWebsite\bin\${{ env.BUILD_CONFIGURATION }}\*" -Destination "${{ env.PUBLISH_PATH }}" -Recurse -Force
-        Copy-Item -Path "src\PartsUnlimitedWebsite\*.aspx" -Destination "${{ env.PUBLISH_PATH }}" -Recurse -Force
-        Copy-Item -Path "src\PartsUnlimitedWebsite\*.config" -Destination "${{ env.PUBLISH_PATH }}" -Force
-        Copy-Item -Path "src\PartsUnlimitedWebsite\Content\*" -Destination "${{ env.PUBLISH_PATH }}\Content" -Recurse -Force -ErrorAction SilentlyContinue
-        Copy-Item -Path "src\PartsUnlimitedWebsite\Scripts\*" -Destination "${{ env.PUBLISH_PATH }}\Scripts" -Recurse -Force -ErrorAction SilentlyContinue
-        
-        Write-Host "📁 Published files:"
-        Get-ChildItem -Path "${{ env.PUBLISH_PATH }}" -Recurse | Select-Object -First 20
-      
-    # Deploy to IIS
-    - name: Deploy to IIS
-      shell: pwsh
-      run: |
-        Write-Host "🚀 Starting IIS Deployment..."
-        
-        # Stop IIS services if running
-        try {
-          Stop-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
-          Write-Host "📴 Website stopped"
-        } catch {
-          Write-Host "ℹ️ Website not running or doesn't exist"
-        }
-        
-        try {
-          Stop-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
-          Write-Host "📴 Application pool stopped"
-        } catch {
-          Write-Host "ℹ️ Application pool not running or doesn't exist"
-        }
-        
-        Start-Sleep -Seconds 2
-        
-        # Ensure deployment directory exists
-        if (!(Test-Path "${{ env.DEPLOY_PATH }}")) {
-          New-Item -Path "${{ env.DEPLOY_PATH }}" -ItemType Directory -Force
-          Write-Host "📁 Created deployment directory"
-        } else {
-          # Backup current files
-          $backupPath = "C:\Backups\PartsUnlimited_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-          Copy-Item -Path "${{ env.DEPLOY_PATH }}\*" -Destination $backupPath -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "💾 Backup created at: $backupPath"
-          
-          # Clean deployment directory
-          Remove-Item -Path "${{ env.DEPLOY_PATH }}\*" -Recurse -Force -ErrorAction SilentlyContinue
-          Write-Host "🧹 Cleaned deployment directory"
-        }
-        
-        # Copy published files
-        if (Test-Path "${{ env.PUBLISH_PATH }}") {
-          Copy-Item -Path "${{ env.PUBLISH_PATH }}\*" -Destination "${{ env.DEPLOY_PATH }}" -Recurse -Force
-          Write-Host "📂 Copied application files"
-        } else {
-          Write-Host "⚠️  Publish directory not found. Creating minimal structure..."
-          # Create minimal web.config if needed
-          $webConfig = @"
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <system.web>
-    <compilation debug="false" targetFramework="4.8" />
-    <httpRuntime targetFramework="4.8" />
-  </system.web>
-</configuration>
-"@
-          $webConfig | Out-File -FilePath "${{ env.DEPLOY_PATH }}\web.config" -Encoding UTF8
-        }
-        
-        # Configure IIS Website
-        $site = Get-Website -Name "${{ env.IIS_SITE_NAME }}" -ErrorAction SilentlyContinue
-        
-        if (!$site) {
-          Write-Host "🌐 Creating new website..."
-          New-Website -Name "${{ env.IIS_SITE_NAME }}" `
-            -Port ${{ env.PORT }} `
-            -PhysicalPath "${{ env.DEPLOY_PATH }}" `
-            -ApplicationPool "${{ env.APP_POOL }}"
-        } else {
-          Write-Host "🌐 Updating existing website..."
-          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" `
-            -Name physicalPath `
-            -Value "${{ env.DEPLOY_PATH }}"
-          Set-ItemProperty "IIS:\Sites\${{ env.IIS_SITE_NAME }}" `
-            -Name bindings `
-            -Value @{protocol="http";bindingInformation="*:${{ env.PORT }}:"}
-        }
-        
-        # Configure Application Pool
-        $pool = Get-WebAppPool -Name "${{ env.APP_POOL }}" -ErrorAction SilentlyContinue
-        
-        if (!$pool) {
-          Write-Host "⚙️ Creating application pool..."
-          New-WebAppPool -Name "${{ env.APP_POOL }}"
-        }
-        
-        # Configure app pool for .NET Framework 4.8
-        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" `
-          -Name managedRuntimeVersion `
-          -Value "v4.0"
-        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" `
-          -Name processModel.identityType `
-          -Value "ApplicationPoolIdentity"
-        Set-ItemProperty "IIS:\AppPools\${{ env.APP_POOL }}" `
-          -Name autoStart `
-          -Value $true
-        
-        # Start services
-        Write-Host "▶️ Starting application pool..."
-        Start-WebAppPool -Name "${{ env.APP_POOL }}"
-        
-        Write-Host "▶️ Starting website..."
-        Start-Website -Name "${{ env.IIS_SITE_NAME }}"
-        
-        Write-Host "✅ Deployment completed!"
-        Write-Host "🔗 Application URL: http://localhost:${{ env.PORT }}"
-        
-        # Health check
-        Write-Host "🏥 Performing health check..."
-        Start-Sleep -Seconds 10
-        
-        $maxRetries = 5
-        for ($i = 1; $i -le $maxRetries; $i++) {
-          try {
-            Write-Host "Attempt $i of $maxRetries..."
-            $response = Invoke-WebRequest -Uri "http://localhost:${{ env.PORT }}" -UseBasicParsing -TimeoutSec 10
-            
-            if ($response.StatusCode -eq 200) {
-              Write-Host "✅ Application is healthy and responding!"
-              break
-            }
-          } catch {
-            Write-Host "Attempt $i failed"
-            if ($i -lt $maxRetries) {
-              Start-Sleep -Seconds 5
-            }
-          }
-        }
-        
-    # Upload artifacts for debugging
-    - name: Upload Build Artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
+    
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
       with:
-        name: build-output
-        path: |
-          ${{ env.PUBLISH_PATH }}
-        retention-days: 7
+        languages: csharp
+        queries: security-extended,security-and-quality
+    
+    - name: Setup .NET for CodeQL
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '6.0.x'
+    
+    - name: Restore dependencies for CodeQL
+      run: dotnet restore PartsUnlimited.sln
+    
+    - name: Build for CodeQL analysis
+      run: dotnet build PartsUnlimited.sln --configuration Release --no-restore
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:csharp"
+
+  # Build, Test and Create Artifact
+  build-test-artifact:
+    runs-on: windows-latest
+    # Uncomment if you want to wait for CodeQL to complete first
+    # needs: analyze
+
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Setup NuGet and restore packages
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
+
+      # Setup MSBuild
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Build solution & publish website
+      - name: Build & Publish Website
+        run: |
+          # Build the web project and publish to artifact folder
+          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=..\..\artifact `
+            /p:DeployTarget=WebPublish
+      
+      # Build test projects
+      - name: Build Test Projects
+        run: |
+          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU
+        continue-on-error: true
+
+      # Run MSTest unit tests
+      - name: Run Unit Tests
+        shell: pwsh
+        run: |
+          # Locate vstest.console.exe dynamically
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
+            Select-Object -First 1
+          Write-Host "Using vstest: $vstest"
+          # Find and run unit test DLLs
+          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
+            Where-Object { $_.FullName -like "*\bin\Release\*" } |
+            Select-Object -ExpandProperty FullName
+          if ($testDlls) {
+            Write-Host "Found test DLLs:"
+            $testDlls | ForEach-Object { Write-Host "  $_" }
+            & "$vstest" $testDlls /Platform:x64 /Logger:trx
+          } else {
+            Write-Host "No test DLLs found"
+          }
+        continue-on-error: true
+
+      # List artifact contents
+      - name: List artifact folder contents
+        run: |
+          if (Test-Path "artifact") {
+            Write-Host "Artifact folder contents:"
+            Get-ChildItem artifact -Recurse | Select-Object FullName
+          } else {
+            Write-Host "Artifact folder not found"
+          }
+      
+      # Upload build artifacts
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
+
+  # Deploy to IIS
+  deploy:
+    needs: build-test-artifact
+    runs-on: self-hosted
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      # Download build artifacts
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: ./artifacts
+      
+      # Simple file copy to IIS path (NO IIS MANAGEMENT)
+      - name: Deploy to IIS
+        shell: powershell
+        run: |
+          # IIS Configuration
+          $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
+          
+          Write-Host "Deploying to: $sitePath"
+          
+          # Ensure directory exists
+          if (!(Test-Path $sitePath)) {
+              New-Item -ItemType Directory -Path $sitePath -Force
+          }
+          
+          # Copy files (overwrite existing)
+          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
+          
+          Write-Host "✅ Deployment completed!"
+          Write-Host "🌐 Application available at: http://localhost:8089"
