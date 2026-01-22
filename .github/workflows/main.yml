@@ -20,15 +20,33 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build and Deploy Directly
+      # Step 1: Build to temp folder
+      - name: Build to Temp Folder
         run: |
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
             /p:Configuration=Release `
             /p:Platform=AnyCPU `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl="C:\inetpub\wwwroot\PartsUnlimited" `
-            /p:DeployTarget=WebPublish `
-            /p:DeleteExistingFiles=True
+            /p:PublishUrl=".\publish" `
+            /p:DeployTarget=WebPublish
           
-          echo "✅ Deployed to C:\inetpub\wwwroot\PartsUnlimited"
+          echo "✅ Build completed to temp folder"
+
+      # Step 2: Copy directly to IIS path
+      - name: Copy to IIS Path
+        run: |
+          $source = ".\publish"
+          $destination = "C:\inetpub\wwwroot\PartsUnlimited"
+          
+          echo "Copying from $source to $destination"
+          
+          # Create destination if doesn't exist
+          if (!(Test-Path $destination)) {
+              New-Item -ItemType Directory -Path $destination -Force
+          }
+          
+          # Copy everything
+          Copy-Item -Path "$source\*" -Destination $destination -Recurse -Force
+          
+          echo "✅ Copied to IIS path"
