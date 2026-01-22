@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline with Security
 
 on:
   push:
@@ -10,8 +10,39 @@ env:
   BUILD_CONFIGURATION: 'Release'
   BUILD_PLATFORM: 'AnyCPU'
 
+# Permissions for CodeQL security scanning
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
-  # 1. BUILD AND TEST
+  # 1. SECURITY SCANNING (CodeQL) - Runs in parallel
+  codeql-security:
+    name: 🔒 CodeQL Security Scan
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    # Initialize CodeQL with C# analysis
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        queries: security-extended
+    
+    # Autobuild for .NET Framework projects
+    - name: Autobuild for CodeQL
+      uses: github/codeql-action/autobuild@v3
+    
+    # Perform CodeQL analysis
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+      with:
+        category: "/language:csharp"
+
+  # 2. BUILD AND TEST - Runs in parallel with security scan
   build:
     name: 🏗️ Build and Test
     runs-on: windows-latest
@@ -31,7 +62,7 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    # Security Check (Simplified)
+    # Manual Security Check
     - name: Security Check
       shell: pwsh
       run: |
@@ -71,9 +102,9 @@ jobs:
           }
         }
         
-        Write-Host "✅ Security check completed" -ForegroundColor Green
+        Write-Host "✅ Manual security check completed" -ForegroundColor Green
 
-    # Build Website Project (NOT the solution)
+    # Build Website Project
     - name: Build Website
       run: |
         msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
@@ -94,10 +125,6 @@ jobs:
           $files = Get-ChildItem -Path "artifact" -Recurse -File
           Write-Host "✅ Build successful" -ForegroundColor Green
           Write-Host "Files generated: $($files.Count)" -ForegroundColor Gray
-          
-          # Show first few files
-          Write-Host "Sample files:" -ForegroundColor Gray
-          Get-ChildItem -Path "artifact" -File | Select-Object -First 5 Name
         } else {
           Write-Host "❌ Build failed - artifact folder not found" -ForegroundColor Red
           exit 1
@@ -111,10 +138,10 @@ jobs:
         path: artifact
         retention-days: 7
 
-  # 2. DEPLOY TO IIS
+  # 3. DEPLOY TO IIS (Waits for both security and build to complete)
   deploy:
     name: 🚀 Deploy to Production
-    needs: build
+    needs: [codeql-security, build]  # Wait for both security AND build
     runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
@@ -135,6 +162,7 @@ jobs:
         Write-Host "========================================"
         Write-Host "Target: $sitePath"
         Write-Host "Port: 8089"
+        Write-Host "Status: ✅ Security scan passed | ✅ Build passed"
         Write-Host ""
         
         # Create directory if needed
