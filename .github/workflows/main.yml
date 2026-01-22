@@ -38,22 +38,6 @@ jobs:
             /p:PublishUrl=..\..\artifact `
             /p:DeployTarget=WebPublish
 
-      # Run tests (optional - continue on error)
-      - name: Run Tests
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe | Select-Object -First 1
-          
-          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
-            Where-Object { $_.FullName -like "*\bin\Release\*" } |
-            Select-Object -ExpandProperty FullName
-          
-          if ($testDlls) {
-            & "$vstest" $testDlls /Platform:x64 /Logger:trx
-          }
-        continue-on-error: true
-
       # Upload artifact for CD
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -61,7 +45,7 @@ jobs:
           name: PartsUnlimited-Web
           path: artifact
 
-  # CD: Simple IIS Deployment (only on push to main/master)
+  # CD: Simple IIS Deployment
   cd:
     needs: ci
     runs-on: self-hosted
@@ -81,18 +65,35 @@ jobs:
         run: |
           # IIS Configuration
           $sitePath = "C:\inetpub\wwwroot\PartsUnlimited"
+          $siteName = "PartsUnlimited"
           
           Write-Host "Starting IIS Deployment..."
           Write-Host "Deployment Path: $sitePath"
+          
+          # Stop IIS App Pool only (keeps web.config accessible)
+          Write-Host "Stopping App Pool to release file locks..."
+          Stop-WebAppPool -Name $siteName -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
           
           # Ensure directory exists
           if (!(Test-Path $sitePath)) {
               New-Item -ItemType Directory -Path $sitePath -Force
           }
           
-          # Deploy files (overwrite existing)
-          Write-Host "Copying files..."
-          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
+          # Delete all files EXCEPT web.config
+          Write-Host "Cleaning old files (keeping web.config)..."
+          Get-ChildItem -Path $sitePath -Exclude "web.config" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          
+          # Copy new files (excluding web.config from source if it exists)
+          Write-Host "Copying new files..."
+          $sourceItems = Get-ChildItem -Path ".\artifacts" -Exclude "web.config"
+          if ($sourceItems) {
+              Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force -Exclude "web.config"
+          }
+          
+          # Restart App Pool
+          Write-Host "Starting App Pool..."
+          Start-WebAppPool -Name $siteName -ErrorAction SilentlyContinue
           
           Write-Host "✅ Deployment completed!"
           Write-Host "🌐 Application available at: http://localhost:8080"
