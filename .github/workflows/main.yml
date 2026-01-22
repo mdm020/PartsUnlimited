@@ -20,23 +20,58 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Step 1: Build to temp folder
-      - name: Build to Temp Folder
+      # Step 1: Build to artifact folder (as in your original)
+      - name: Build to Artifact Folder
         run: |
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
             /p:Configuration=Release `
             /p:Platform=AnyCPU `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=".\publish" `
+            /p:PublishUrl="..\..\artifact" `
             /p:DeployTarget=WebPublish
           
-          echo "✅ Build completed to temp folder"
+          echo "✅ Build completed"
 
-      # Step 2: Copy directly to IIS path
+      # Step 2: Debug - Show what was built
+      - name: Show Build Output
+        run: |
+          echo "Current directory: $(pwd)"
+          echo "Folder contents:"
+          dir /s /b | findstr /i "artifact publish"
+          
+          if (Test-Path ".\artifact") {
+            echo "Artifact folder exists"
+            dir ".\artifact"
+          }
+          
+          if (Test-Path ".\publish") {
+            echo "Publish folder exists"
+            dir ".\publish"
+          }
+
+      # Step 3: Copy from correct location
       - name: Copy to IIS Path
         run: |
-          $source = ".\publish"
+          # Try different possible source locations
+          if (Test-Path ".\artifact") {
+            $source = ".\artifact"
+            echo "Using source: $source"
+          } elseif (Test-Path ".\publish") {
+            $source = ".\publish"
+            echo "Using source: $source"
+          } else {
+            # Try to find the output folder
+            $found = Get-ChildItem -Path "." -Recurse -Directory -Filter "*publish*" | Select-Object -First 1
+            if ($found) {
+              $source = $found.FullName
+              echo "Found source: $source"
+            } else {
+              echo "ERROR: No build output found!"
+              exit 1
+            }
+          }
+          
           $destination = "C:\inetpub\wwwroot\PartsUnlimited"
           
           echo "Copying from $source to $destination"
@@ -46,7 +81,11 @@ jobs:
               New-Item -ItemType Directory -Path $destination -Force
           }
           
+          # Show what we're copying
+          echo "Source contents:"
+          Get-ChildItem -Path $source -Recurse | Select-Object -First 10 Name
+          
           # Copy everything
           Copy-Item -Path "$source\*" -Destination $destination -Recurse -Force
           
-          echo "✅ Copied to IIS path"
+          echo "✅ Successfully deployed to IIS"
