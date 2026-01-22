@@ -20,8 +20,9 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Step 1: Build to artifact folder (as in your original)
+      # Build using your original configuration
       - name: Build to Artifact Folder
+        shell: pwsh
         run: |
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
             /p:Configuration=Release `
@@ -31,61 +32,54 @@ jobs:
             /p:PublishUrl="..\..\artifact" `
             /p:DeployTarget=WebPublish
           
-          echo "✅ Build completed"
+          Write-Host "✅ Build completed"
 
-      # Step 2: Debug - Show what was built
-      - name: Show Build Output
+      # Simple check of what was created
+      - name: Check Build Output
+        shell: pwsh
         run: |
-          echo "Current directory: $(pwd)"
-          echo "Folder contents:"
-          dir /s /b | findstr /i "artifact publish"
+          Write-Host "Current directory: $(Get-Location)"
+          Write-Host "`nLooking for build output..."
           
+          # Check for artifact folder
           if (Test-Path ".\artifact") {
-            echo "Artifact folder exists"
-            dir ".\artifact"
-          }
-          
-          if (Test-Path ".\publish") {
-            echo "Publish folder exists"
-            dir ".\publish"
-          }
-
-      # Step 3: Copy from correct location
-      - name: Copy to IIS Path
-        run: |
-          # Try different possible source locations
-          if (Test-Path ".\artifact") {
-            $source = ".\artifact"
-            echo "Using source: $source"
-          } elseif (Test-Path ".\publish") {
-            $source = ".\publish"
-            echo "Using source: $source"
+              Write-Host "Found 'artifact' folder"
+              $files = Get-ChildItem -Path ".\artifact" -Recurse | Measure-Object
+              Write-Host "Contains $($files.Count) files"
+              Get-ChildItem -Path ".\artifact" -File | Select-Object -First 5 Name
           } else {
-            # Try to find the output folder
-            $found = Get-ChildItem -Path "." -Recurse -Directory -Filter "*publish*" | Select-Object -First 1
-            if ($found) {
-              $source = $found.FullName
-              echo "Found source: $source"
-            } else {
-              echo "ERROR: No build output found!"
-              exit 1
-            }
+              Write-Host "'artifact' folder not found"
           }
           
+          # Also check root for any output
+          Write-Host "`nChecking for any output folders..."
+          Get-ChildItem -Path "." -Directory | Where-Object { $_.Name -match "artifact|publish|bin|obj" } | Select-Object Name
+
+      # Direct copy from artifact to IIS path
+      - name: Deploy to IIS
+        shell: pwsh
+        run: |
+          $source = ".\artifact"
           $destination = "C:\inetpub\wwwroot\PartsUnlimited"
           
-          echo "Copying from $source to $destination"
+          if (!(Test-Path $source)) {
+              Write-Host "❌ ERROR: Source folder '$source' not found!"
+              Write-Host "Available folders in current directory:"
+              Get-ChildItem -Path "." -Directory | Select-Object Name
+              exit 1
+          }
+          
+          Write-Host "Copying from $source to $destination"
           
           # Create destination if doesn't exist
           if (!(Test-Path $destination)) {
               New-Item -ItemType Directory -Path $destination -Force
+              Write-Host "Created destination directory"
           }
           
-          # Show what we're copying
-          echo "Source contents:"
-          Get-ChildItem -Path $source -Recurse | Select-Object -First 10 Name
-          
           # Copy everything
+          Write-Host "Starting file copy..."
           Copy-Item -Path "$source\*" -Destination $destination -Recurse -Force
           
-          echo "✅ Successfully deployed to IIS"
+          Write-Host "✅ Successfully deployed to IIS path"
+          Write-Host "🌐 Application available at: http://localhost:8080"
