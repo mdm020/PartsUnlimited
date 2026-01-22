@@ -1,52 +1,118 @@
-name: Build and Deploy
+name: CI Build and Deploy
+
 on:
   push:
-    branches: [main, master]
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
 
 jobs:
-  deploy:
+  build-test-artifact:
     runs-on: windows-latest
-    
+
     steps:
+      # Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Setup NuGet and restore packages
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
-      - name: Restore packages
+      - name: Restore NuGet packages
         run: nuget restore PartsUnlimited.sln
 
+      # Setup MSBuild
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Build step
-      - name: Build
-        shell: pwsh
+      # Build solution & publish website
+      - name: Build & Publish Website
         run: |
+          # Build the web project and publish to artifact folder
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
             /p:Configuration=Release `
             /p:Platform=AnyCPU `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl="..\..\artifact" `
+            /p:PublishUrl=..\..\artifact `
             /p:DeployTarget=WebPublish
+      # Build test projects
+      - name: Build Test Projects
+        run: |
+          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU
+        continue-on-error: true
 
-      # Deploy step - NO IIS MODULES
-      - name: Copy to IIS Path
+      # Run MSTest unit tests
+      - name: Run Unit Tests
         shell: pwsh
         run: |
+          # Locate vstest.console.exe dynamically
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
+            Select-Object -First 1
+          Write-Host "Using vstest: $vstest"
+          # Find and run unit test DLLs
+          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
+            Where-Object { $_.FullName -like "*\bin\Release\*" } |
+            Select-Object -ExpandProperty FullName
+          if ($testDlls) {
+            Write-Host "Found test DLLs:"
+            $testDlls | ForEach-Object { Write-Host "  $_" }
+            & "$vstest" $testDlls /Platform:x64 /Logger:trx
+          } else {
+            Write-Host "No test DLLs found"
+          }
+        continue-on-error: true
+
+      # List artifact contents
+      - name: List artifact folder contents
+        run: |
+          if (Test-Path "artifact") {
+            Write-Host "Artifact folder contents:"
+            Get-ChildItem artifact -Recurse | Select-Object FullName
+          } else {
+            Write-Host "Artifact folder not found"
+          }
+      # Upload build artifacts
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
+
+  deploy:
+    needs: build-test-artifact
+    runs-on: self-hosted
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      # Download build artifacts
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: ./artifacts
+      
+      # Simple file copy to IIS path (NO IIS MANAGEMENT)
+      - name: Deploy to IIS
+        shell: powershell
+        run: |
+          # IIS Configuration
           $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
           
-          Write-Host "Copying files to: $sitePath"
+          Write-Host "Deploying to: $sitePath"
           
-          # Create directory if needed
+          # Ensure directory exists
           if (!(Test-Path $sitePath)) {
               New-Item -ItemType Directory -Path $sitePath -Force
           }
           
-          # Simple file copy
-          Copy-Item -Path ".\artifact\*" -Destination $sitePath -Recurse -Force
+          # Copy files (overwrite existing)
+          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
           
-          Write-Host "✅ Deployment complete"
-          Write-Host "🌐 http://localhost:8089"
+          Write-Host "✅ Deployment completed!"
+          Write-Host "🌐 Application available at: http://localhost:8089"
