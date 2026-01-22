@@ -20,8 +20,8 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Build using your original configuration
-      - name: Build to Artifact Folder
+      # Build step
+      - name: Build
         shell: pwsh
         run: |
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
@@ -31,55 +31,30 @@ jobs:
             /p:WebPublishMethod=FileSystem `
             /p:PublishUrl="..\..\artifact" `
             /p:DeployTarget=WebPublish
-          
-          Write-Host "✅ Build completed"
 
-      # Simple check of what was created
-      - name: Check Build Output
-        shell: pwsh
-        run: |
-          Write-Host "Current directory: $(Get-Location)"
-          Write-Host "`nLooking for build output..."
-          
-          # Check for artifact folder
-          if (Test-Path ".\artifact") {
-              Write-Host "Found 'artifact' folder"
-              $files = Get-ChildItem -Path ".\artifact" -Recurse | Measure-Object
-              Write-Host "Contains $($files.Count) files"
-              Get-ChildItem -Path ".\artifact" -File | Select-Object -First 5 Name
-          } else {
-              Write-Host "'artifact' folder not found"
-          }
-          
-          # Also check root for any output
-          Write-Host "`nChecking for any output folders..."
-          Get-ChildItem -Path "." -Directory | Where-Object { $_.Name -match "artifact|publish|bin|obj" } | Select-Object Name
-
-      # Direct copy from artifact to IIS path
+      # Deploy step with new IIS configuration
       - name: Deploy to IIS
         shell: pwsh
         run: |
-          $source = ".\artifact"
-          $destination = "C:\inetpub\wwwroot\PartsUnlimited"
+          # IIS Configuration
+          $siteName = "MyDotNetApp"
+          $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
+          $sitePort = 8089
           
-          if (!(Test-Path $source)) {
-              Write-Host "❌ ERROR: Source folder '$source' not found!"
-              Write-Host "Available folders in current directory:"
-              Get-ChildItem -Path "." -Directory | Select-Object Name
-              exit 1
+          Write-Host "Starting deployment..."
+          Write-Host "IIS Site: $siteName"
+          Write-Host "Port: $sitePort"
+          Write-Host "Path: $sitePath"
+          
+          # Ensure directory exists
+          if (!(Test-Path $sitePath)) {
+              New-Item -ItemType Directory -Path $sitePath -Force
+              Write-Host "Created directory: $sitePath"
           }
           
-          Write-Host "Copying from $source to $destination"
+          # Copy build artifacts
+          Write-Host "Copying files from artifact folder..."
+          Copy-Item -Path ".\artifact\*" -Destination $sitePath -Recurse -Force
           
-          # Create destination if doesn't exist
-          if (!(Test-Path $destination)) {
-              New-Item -ItemType Directory -Path $destination -Force
-              Write-Host "Created destination directory"
-          }
-          
-          # Copy everything
-          Write-Host "Starting file copy..."
-          Copy-Item -Path "$source\*" -Destination $destination -Recurse -Force
-          
-          Write-Host "✅ Successfully deployed to IIS path"
-          Write-Host "🌐 Application available at: http://localhost:8080"
+          Write-Host "✅ Deployment completed!"
+          Write-Host "🌐 Application available at: http://localhost:$sitePort"
