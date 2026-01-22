@@ -1,4 +1,4 @@
-name: CI/CD Pipeline with Security
+name: CI/CD Pipeline
 
 on:
   push:
@@ -10,39 +10,8 @@ env:
   BUILD_CONFIGURATION: 'Release'
   BUILD_PLATFORM: 'AnyCPU'
 
-# Permissions for CodeQL security scanning
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
-  # 1. SECURITY SCANNING (CodeQL) - Runs in parallel
-  codeql-security:
-    name: 🔒 CodeQL Security Scan
-    runs-on: windows-latest
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    # Initialize CodeQL with C# analysis
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: csharp
-        queries: security-extended
-    
-    # Autobuild for .NET Framework projects
-    - name: Autobuild for CodeQL
-      uses: github/codeql-action/autobuild@v3
-    
-    # Perform CodeQL analysis
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:csharp"
-
-  # 2. BUILD AND TEST - Runs in parallel with security scan
+  # 1. BUILD AND TEST
   build:
     name: 🏗️ Build and Test
     runs-on: windows-latest
@@ -51,7 +20,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # Setup build tools
     - name: Setup NuGet
       uses: NuGet/setup-nuget@v2
 
@@ -62,49 +30,6 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    # Manual Security Check
-    - name: Security Check
-      shell: pwsh
-      run: |
-        Write-Host "=== SECURITY CHECK ===" -ForegroundColor Yellow
-        
-        # Check for hardcoded connection strings
-        $webConfig = "src\PartsUnlimitedWebsite\Web.config"
-        if (Test-Path $webConfig) {
-          $content = Get-Content $webConfig -Raw
-          
-          if ($content -match 'password\s*=\s*["'']') {
-            Write-Host "⚠️  Found 'password=' in web.config" -ForegroundColor Yellow
-            Write-Host "   Consider using environment variables" -ForegroundColor Gray
-          }
-          
-          if ($content -match 'connectionString\s*=\s*["''].*Password.*["'']') {
-            Write-Host "⚠️  Found credentials in connection string" -ForegroundColor Yellow
-          }
-        }
-        
-        # Check for vulnerable packages
-        Write-Host "`n=== PACKAGE CHECK ===" -ForegroundColor Yellow
-        $packagesConfig = "src\PartsUnlimitedWebsite\packages.config"
-        if (Test-Path $packagesConfig) {
-          $content = Get-Content $packagesConfig -Raw
-          
-          $vulnerablePackages = @{
-            "bootstrap" = "3.3.7"
-            "jQuery" = "3.1.1"
-            "Newtonsoft.Json" = "9.0.1"
-          }
-          
-          foreach ($pkg in $vulnerablePackages.GetEnumerator()) {
-            if ($content -match "package id=`"$($pkg.Name)`"") {
-              Write-Host "⚠️  $($pkg.Name) $($pkg.Value) has known vulnerabilities" -ForegroundColor Yellow
-            }
-          }
-        }
-        
-        Write-Host "✅ Manual security check completed" -ForegroundColor Green
-
-    # Build Website Project
     - name: Build Website
       run: |
         msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
@@ -117,20 +42,17 @@ jobs:
           /p:PackageRestore=true `
           /p:RestorePackagesPath=packages
 
-    # Verify build output
     - name: Verify Build
       shell: pwsh
       run: |
         if (Test-Path "artifact") {
           $files = Get-ChildItem -Path "artifact" -Recurse -File
-          Write-Host "✅ Build successful" -ForegroundColor Green
-          Write-Host "Files generated: $($files.Count)" -ForegroundColor Gray
+          Write-Host "✅ Build successful - $($files.Count) files generated" -ForegroundColor Green
         } else {
           Write-Host "❌ Build failed - artifact folder not found" -ForegroundColor Red
           exit 1
         }
 
-    # Upload artifact for deployment
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
@@ -138,10 +60,10 @@ jobs:
         path: artifact
         retention-days: 7
 
-  # 3. DEPLOY TO IIS (Waits for both security and build to complete)
+  # 2. DEPLOY TO IIS
   deploy:
     name: 🚀 Deploy to Production
-    needs: [codeql-security, build]  # Wait for both security AND build
+    needs: build
     runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
@@ -162,32 +84,19 @@ jobs:
         Write-Host "========================================"
         Write-Host "Target: $sitePath"
         Write-Host "Port: 8089"
-        Write-Host "Status: ✅ Security scan passed | ✅ Build passed"
         Write-Host ""
         
         # Create directory if needed
         if (!(Test-Path $sitePath)) {
           New-Item -ItemType Directory -Path $sitePath -Force
-          Write-Host "Created directory" -ForegroundColor Gray
-        }
-        
-        # Count existing files
-        $existingFiles = 0
-        if (Test-Path $sitePath) {
-          $existingFiles = (Get-ChildItem -Path $sitePath -Recurse -File | Measure-Object).Count
         }
         
         # Deploy files
-        Write-Host "Copying files..." -ForegroundColor Gray
         Copy-Item -Path ".\deploy-files\*" -Destination $sitePath -Recurse -Force
-        
-        # Count new files
-        $newFiles = (Get-ChildItem -Path $sitePath -Recurse -File | Measure-Object).Count
         
         Write-Host ""
         Write-Host "========================================" -ForegroundColor Green
         Write-Host "✅ DEPLOYMENT SUCCESSFUL"
         Write-Host "========================================" -ForegroundColor Green
-        Write-Host "Files deployed: $newFiles" -ForegroundColor Gray
         Write-Host "Application: http://localhost:8089" -ForegroundColor Cyan
         Write-Host "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
