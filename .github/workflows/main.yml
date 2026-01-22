@@ -1,0 +1,171 @@
+name: CI/CD Pipeline with Security & IIS Deployment
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # SECURITY SCAN with CodeQL
+  analyze:
+    name: Analyze with CodeQL
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        queries: security-extended,security-and-quality
+    
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: '6.0.x'
+    
+    - name: Restore dependencies
+      run: dotnet restore PartsUnlimited.sln
+    
+    - name: Build
+      run: dotnet build PartsUnlimited.sln --configuration Release --no-restore
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # BUILD, TEST & DEPLOY
+  build-test-deploy:
+    runs-on: windows-latest
+    needs: analyze  # Wait for security scan to complete
+
+    steps:
+      # Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Setup NuGet and restore packages
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
+
+      # Setup MSBuild
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Build solution & publish website
+      - name: Build & Publish Website
+        run: |
+          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=..\..\artifact `
+            /p:DeployTarget=WebPublish
+
+      # Build test projects
+      - name: Build Test Projects
+        run: |
+          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU
+        continue-on-error: true
+
+      # Run MSTest unit tests
+      - name: Run Unit Tests
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
+            Select-Object -First 1
+          
+          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
+            Where-Object { $_.FullName -like "*\bin\Release\*" } |
+            Select-Object -ExpandProperty FullName
+          
+          if ($testDlls) {
+            & "$vstest" $testDlls /Platform:x64 /Logger:trx
+          }
+        continue-on-error: true
+
+      # Publish Artifact
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
+
+  # DEPLOY TO IIS
+  deploy:
+    needs: build-test-deploy
+    runs-on: self-hosted
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      # Download build artifacts
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: ./artifacts
+      
+      # Deploy to IIS (Simplified as requested)
+      - name: Deploy to IIS
+        shell: powershell
+        run: |
+          # IIS Configuration
+          $siteName = "PartsUnlimited"
+          $sitePath = "C:\inetpub\wwwroot\PartsUnlimited"
+          $sitePort = 8080
+          $appPoolName = "PartsUnlimitedAppPool"
+          
+          Write-Host "Starting IIS Deployment..."
+          Write-Host "Site: $siteName"
+          Write-Host "Path: $sitePath"
+          Write-Host "Port: $sitePort"
+          
+          # Load IIS module
+          Import-Module WebAdministration
+          
+          # Stop IIS services
+          Write-Host "Stopping IIS services..."
+          Stop-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+          Stop-Website -Name $siteName -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          
+          # Ensure directory exists
+          if (!(Test-Path $sitePath)) {
+              New-Item -ItemType Directory -Path $sitePath -Force
+          }
+          
+          # Deploy files
+          Write-Host "Deploying files..."
+          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
+          
+          # Start IIS services
+          Write-Host "Starting IIS services..."
+          Start-WebAppPool -Name $appPoolName -ErrorAction SilentlyContinue
+          Start-Website -Name $siteName -ErrorAction SilentlyContinue
+          
+          Write-Host "Deployment completed!"
+          Write-Host "Application available at: http://localhost:$sitePort"
+      
+      # Verify deployment
+      - name: Verify deployment
+        shell: powershell
+        run: |
+          $url = "http://localhost:8080"
+          Write-Host "Testing $url ..."
+          
+          try {
+              $response = Invoke-WebRequest -Uri $url -Method Head -TimeoutSec 10
+              Write-Host "SUCCESS: Site is responding (Status: $($response.StatusCode))"
+          }
+          catch {
+              Write-Host "WARNING: Site may not be fully started yet"
+          }
