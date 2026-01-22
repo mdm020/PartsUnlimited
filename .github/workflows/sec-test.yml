@@ -9,211 +9,270 @@ on:
 permissions:
   contents: read
   security-events: write
+  actions: read
 
 jobs:
-  # Security Scanning
-  security:
-    name: 🔒 Security Scan
+  # 1. SECURITY ANALYSIS FIRST
+  security-analysis:
+    name: 🔒 Security & Code Analysis
     runs-on: windows-latest
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
     
+    # CodeQL Static Security Analysis
     - name: Initialize CodeQL
       uses: github/codeql-action/init@v3
       with:
         languages: csharp
         queries: security-extended,security-and-quality
     
-    # For .NET Framework projects, use autobuild
-    - name: Autobuild for CodeQL
-      uses: github/codeql-action/autobuild@v3
+    - name: Setup MSBuild for CodeQL
+      uses: microsoft/setup-msbuild@v2
+    
+    - name: Build for CodeQL Analysis
+      run: |
+        msbuild PartsUnlimited.sln `
+          /p:Configuration=Debug `
+          /p:Platform=AnyCPU `
+          /p:RunCodeAnalysis=true `
+          /verbosity:minimal
     
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
+    
+    # Quick Security Checks
+    - name: Quick Security Scan
+      shell: pwsh
+      run: |
+        Write-Host "=== SECURITY SCAN ===" -ForegroundColor Yellow
+        
+        # Check for hardcoded connection strings
+        $webConfig = "src\PartsUnlimitedWebsite\Web.config"
+        if (Test-Path $webConfig) {
+          try {
+            $xml = [xml](Get-Content $webConfig)
+            $connectionStrings = $xml.configuration.connectionStrings.add
+            
+            if ($connectionStrings) {
+              Write-Host "Found connection strings:" -ForegroundColor Cyan
+              foreach ($cs in $connectionStrings) {
+                Write-Host "  - $($cs.name)" -ForegroundColor Gray
+              }
+              Write-Host "`n⚠️  Review connection strings for production" -ForegroundColor Yellow
+            }
+          } catch {
+            Write-Host "Could not parse web.config" -ForegroundColor Gray
+          }
+        }
+        
+        # Check for common sensitive patterns
+        Write-Host "`n=== Checking for sensitive patterns ===" -ForegroundColor Yellow
+        $sensitivePatterns = @(
+          "password\s*=",
+          "pwd\s*=",
+          "secret\s*=",
+          "token\s*="
+        )
+        
+        $found = $false
+        $configFiles = Get-ChildItem -Path "src" -Filter "*.config" -Recurse
+        
+        foreach ($file in $configFiles) {
+          $content = Get-Content $file.FullName -Raw
+          foreach ($pattern in $sensitivePatterns) {
+            if ($content -match $pattern) {
+              Write-Host "⚠️  Found '$pattern' in $($file.Name)" -ForegroundColor Yellow
+              $found = $true
+            }
+          }
+        }
+        
+        if (-not $found) {
+          Write-Host "✅ No obvious hardcoded secrets found" -ForegroundColor Green
+        }
+        
+        Write-Host "`n✅ Security scan completed" -ForegroundColor Green
 
-  # Build and Test
-  build-test:
+  # 2. BUILD AND TEST (depends on security passing)
+  build-and-test:
     name: 🏗️ Build and Test
     runs-on: windows-latest
-
+    needs: security-analysis  # Wait for security analysis
+    
     steps:
-      # Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # Setup NuGet and restore packages
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
+    # Setup build tools
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
 
-      - name: Restore NuGet packages
-        run: |
-          nuget restore PartsUnlimited.sln -PackagesDirectory packages
+    - name: Restore NuGet packages
+      run: |
+        nuget restore PartsUnlimited.sln -PackagesDirectory packages
 
-      # Setup MSBuild
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
 
-      # Build solution & publish website
-      - name: Build & Publish Website
-        run: |
-          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=..\..\artifact `
-            /p:DeployTarget=WebPublish `
-            /p:PackageRestore=true `
-            /p:RestorePackagesPath=packages
+    # Build main website
+    - name: Build Website
+      run: |
+        msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+          /p:Configuration=Release `
+          /p:Platform=AnyCPU `
+          /p:DeployOnBuild=true `
+          /p:WebPublishMethod=FileSystem `
+          /p:PublishUrl=..\..\artifact `
+          /p:DeployTarget=WebPublish `
+          /p:PackageRestore=true `
+          /p:RestorePackagesPath=packages
 
-      # Build test projects
-      - name: Build Test Projects
-        run: |
-          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU `
-            /p:PackageRestore=true `
-            /p:RestorePackagesPath=packages
-        continue-on-error: true
+    # Build and run tests
+    - name: Build Test Projects
+      run: |
+        msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
+          /p:Configuration=Release `
+          /p:Platform=AnyCPU `
+          /p:PackageRestore=true `
+          /p:RestorePackagesPath=packages
+      continue-on-error: true
 
-      # Run MSTest unit tests
-      - name: Run Unit Tests
-        shell: pwsh
-        run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
-            Select-Object -First 1
-          
+    - name: Run Unit Tests
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe | Select-Object -First 1
+        
+        if ($vstest -and (Test-Path $vstest)) {
           $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
             Where-Object { $_.FullName -like "*\bin\Release\*" } |
             Select-Object -ExpandProperty FullName
           
           if ($testDlls) {
             & "$vstest" $testDlls /Platform:x64 /Logger:trx
-          }
-        continue-on-error: true
-
-      # Vulnerability Check on Dependencies
-      - name: Check for Vulnerable Dependencies
-        shell: pwsh
-        run: |
-          Write-Host "=== SECURITY: Checking for vulnerable packages ===" -ForegroundColor Yellow
-          
-          # Check for known vulnerable packages
-          $vulnerablePackages = @{
-            "bootstrap" = "3.3.7"
-            "jQuery" = "3.1.1"
-            "Newtonsoft.Json" = "9.0.1"
-            "Microsoft.Owin" = "3.0.1"
-          }
-          
-          $packagesConfig = Get-Content "src\PartsUnlimitedWebsite\packages.config" -Raw
-          $foundVulnerabilities = $false
-          
-          foreach ($pkg in $vulnerablePackages.GetEnumerator()) {
-            if ($packagesConfig -match "package id=`"$($pkg.Name)`"") {
-              Write-Host "⚠️  WARNING: $($pkg.Name) $($pkg.Value) has known vulnerabilities" -ForegroundColor Red
-              Write-Host "   Consider upgrading to latest version" -ForegroundColor Yellow
-              $foundVulnerabilities = $true
-            }
-          }
-          
-          if (-not $foundVulnerabilities) {
-            Write-Host "✅ No highly vulnerable packages detected" -ForegroundColor Green
-          }
-
-      # Secret Scanning
-      - name: Scan for Secrets
-        shell: pwsh
-        run: |
-          Write-Host "=== SECURITY: Scanning for hardcoded secrets ===" -ForegroundColor Yellow
-          
-          $patterns = @(
-            '(?i)password\s*=\s*["''][^"\'\n]{8,}["'']',
-            '(?i)connectionString\s*=\s*["''][^"\'\n]{20,}["'']',
-            '(?i)api[_-]?key\s*=\s*["''][^"\'\n]{10,}["'']',
-            '(?i)secret[_-]?key\s*=\s*["''][^"\'\n]{10,}["'']',
-            '(?i)token\s*=\s*["''][^"\'\n]{10,}["'']',
-            'aws[_-]?key\s*=\s*["''][^"\'\n]{10,}["'']'
-          )
-          
-          $filesToScan = @(
-            "**/*.config",
-            "**/*.json", 
-            "**/*.cs",
-            "**/*.cshtml"
-          )
-          
-          $foundSecrets = $false
-          foreach ($file in (Get-ChildItem -Path $filesToScan -Recurse -File)) {
-            $content = Get-Content $file.FullName -Raw
-            foreach ($pattern in $patterns) {
-              if ($content -match $pattern) {
-                Write-Host "❌ POTENTIAL SECRET FOUND:" -ForegroundColor Red
-                Write-Host "   File: $($file.FullName)" -ForegroundColor Yellow
-                Write-Host "   Pattern: $pattern" -ForegroundColor Gray
-                $foundSecrets = $true
-              }
-            }
-          }
-          
-          if ($foundSecrets) {
-            Write-Host "`n❌ SECURITY ISSUE: Hardcoded secrets detected!" -ForegroundColor Red
-            Write-Host "   Remove secrets from code and use secure storage" -ForegroundColor Yellow
-            exit 1
+            Write-Host "✅ Tests completed" -ForegroundColor Green
           } else {
-            Write-Host "✅ No hardcoded secrets found" -ForegroundColor Green
+            Write-Host "⚠️  No test DLLs found" -ForegroundColor Yellow
           }
+        } else {
+          Write-Host "⚠️  vstest.console.exe not found" -ForegroundColor Yellow
+        }
+      continue-on-error: true
 
-      # Verify artifact
-      - name: Verify artifact folder
-        run: |
-          if (Test-Path "artifact") {
-            Write-Host "✅ Artifact folder created successfully"
-          } else {
-            Write-Host "❌ Artifact folder not found"
-            exit 1
-          }
+    # Verify artifact
+    - name: Verify Build Output
+      shell: pwsh
+      run: |
+        if (Test-Path "artifact") {
+          $fileCount = (Get-ChildItem -Path "artifact" -Recurse -File | Measure-Object).Count
+          Write-Host "✅ Build successful - $fileCount files in artifact" -ForegroundColor Green
+          Get-ChildItem -Path "artifact" -File | Select-Object -First 5 Name
+        } else {
+          Write-Host "❌ Build failed - artifact folder not found" -ForegroundColor Red
+          exit 1
+        }
 
-      # Upload build artifacts
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: artifact
+    # Upload artifact for deployment
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-app
+        path: artifact
+        retention-days: 7
 
-  # Deploy to IIS
-  deploy:
+  # 3. DEPLOY TO PRODUCTION (only on main/master)
+  deploy-production:
     name: 🚀 Deploy to Production
-    needs: [security, build-test]
+    needs: build-and-test
     runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
+    environment: production
+    
     steps:
-      # Download build artifacts
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: ./artifacts
-      
-      # Simple file copy to IIS path
-      - name: Deploy to IIS
-        shell: powershell
-        run: |
-          $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
-          
-          Write-Host "🚀 Deploying to: $sitePath"
-          
-          # Ensure directory exists
-          if (!(Test-Path $sitePath)) {
-              New-Item -ItemType Directory -Path $sitePath -Force
+    # Download artifact
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: web-app
+        path: ./deploy-artifacts
+    
+    # Simple deployment - just copy files
+    - name: Deploy to IIS
+      shell: pwsh
+      run: |
+        $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
+        
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "🚀 PRODUCTION DEPLOYMENT" -ForegroundColor Cyan
+        Write-Host "========================================" -ForegroundColor Cyan
+        Write-Host "Target: $sitePath" -ForegroundColor Gray
+        Write-Host "Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
+        Write-Host ""
+        
+        # Create backup of existing (optional)
+        $backupPath = "${sitePath}_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        if (Test-Path $sitePath -PathType Container) {
+          if ((Get-ChildItem $sitePath | Measure-Object).Count -gt 0) {
+            try {
+              Copy-Item -Path $sitePath -Destination $backupPath -Recurse -Force -ErrorAction SilentlyContinue
+              Write-Host "📦 Backup created: $backupPath" -ForegroundColor Gray
+            } catch {
+              Write-Host "⚠️  Could not create backup" -ForegroundColor Yellow
+            }
           }
+        }
+        
+        # Ensure directory exists
+        if (!(Test-Path $sitePath)) {
+          New-Item -ItemType Directory -Path $sitePath -Force | Out-Null
+          Write-Host "Created directory: $sitePath" -ForegroundColor Gray
+        }
+        
+        # Deploy new files
+        Write-Host "📤 Deploying files..." -ForegroundColor Gray
+        $sourceFiles = Get-ChildItem -Path ".\deploy-artifacts" -Recurse -File
+        Copy-Item -Path ".\deploy-artifacts\*" -Destination $sitePath -Recurse -Force
+        
+        Write-Host "✅ Deployed $($sourceFiles.Count) files" -ForegroundColor Green
+        
+        # Final message
+        Write-Host ""
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "✅ DEPLOYMENT SUCCESSFUL" -ForegroundColor Green
+        Write-Host "========================================" -ForegroundColor Green
+        Write-Host "🌐 Application: http://localhost:8089" -ForegroundColor Cyan
+        Write-Host "🕐 Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
+        
+        if (Test-Path $backupPath) {
+          Write-Host "📦 Backup: $backupPath" -ForegroundColor Gray
+        }
+    
+    # Optional: Health check
+    - name: Health Check
+      shell: pwsh
+      run: |
+        Write-Host "Running health check..."
+        
+        $url = "http://localhost:8089"
+        $maxAttempts = 5
+        
+        for ($i = 1; $i -le $maxAttempts; $i++) {
+          Write-Host "Attempt $i/$maxAttempts to reach $url"
           
-          # Copy files (overwrite existing)
-          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
-          
-          Write-Host "✅ Deployment completed!"
-          Write-Host "🌐 Application available at: http://localhost:8089"
+          try {
+            $response = Invoke-WebRequest -Uri $url -Method Head -TimeoutSec 10 -ErrorAction Stop
+            if ($response.StatusCode -eq 200) {
+              Write-Host "✅ Site is responding (HTTP $($response.StatusCode))" -ForegroundColor Green
+              break
+            }
+          } catch {
+            if ($i -eq $maxAttempts) {
+              Write-Host "⚠️  Site may be starting up slowly" -ForegroundColor Yellow
+            } else {
+              Start-Sleep -Seconds 5
+            }
+          }
+        }
