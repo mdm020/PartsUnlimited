@@ -1,11 +1,53 @@
-name: Deploy to IIS
+name: CI/CD Pipeline
 on:
   push:
     branches: [main, master]
-  workflow_dispatch:
+  pull_request:
+    branches: [main, master]
 
 jobs:
-  deploy:
+  # CI: Build and Create Artifact
+  ci:
+    runs-on: windows-latest
+    
+    steps:
+      # Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Setup NuGet
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      # Restore packages
+      - name: Restore NuGet packages
+        run: nuget restore PartsUnlimited.sln
+
+      # Setup MSBuild
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # Build solution
+      - name: Build & Publish Website
+        run: |
+          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+            /p:Configuration=Release `
+            /p:Platform=AnyCPU `
+            /p:DeployOnBuild=true `
+            /p:WebPublishMethod=FileSystem `
+            /p:PublishUrl=..\..\artifact `
+            /p:DeployTarget=WebPublish
+
+      # Upload artifact for CD
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PartsUnlimited-Web
+          path: artifact
+
+  # CD: Simple file copy to IIS path
+  cd:
+    needs: ci
     runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
@@ -36,3 +78,4 @@ jobs:
           Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
           
           Write-Host "✅ Files copied successfully"
+          Write-Host "🌐 Application available at: http://localhost:8080"
