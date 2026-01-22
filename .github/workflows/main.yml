@@ -1,53 +1,11 @@
-name: CI/CD Pipeline
+name: Deploy to IIS
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
+  workflow_dispatch:
 
 jobs:
-  # CI: Build, Test, and Create Artifact
-  ci:
-    runs-on: windows-latest
-    
-    steps:
-      # Checkout code
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # Setup NuGet
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
-
-      # Restore packages
-      - name: Restore NuGet packages
-        run: nuget restore PartsUnlimited.sln
-
-      # Setup MSBuild
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      # Build solution
-      - name: Build & Publish Website
-        run: |
-          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=..\..\artifact `
-            /p:DeployTarget=WebPublish
-
-      # Upload artifact for CD
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: artifact
-
-  # CD: Simple IIS Deployment
-  cd:
-    needs: ci
+  deploy:
     runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
@@ -59,41 +17,22 @@ jobs:
           name: PartsUnlimited-Web
           path: ./artifacts
       
-      # Simple IIS Deployment
-      - name: Deploy to IIS
+      # Simple file copy to IIS path
+      - name: Copy to IIS Path
         shell: powershell
         run: |
-          # IIS Configuration
           $sitePath = "C:\inetpub\wwwroot\PartsUnlimited"
-          $siteName = "PartsUnlimited"
           
-          Write-Host "Starting IIS Deployment..."
-          Write-Host "Deployment Path: $sitePath"
-          
-          # Stop IIS App Pool only (keeps web.config accessible)
-          Write-Host "Stopping App Pool to release file locks..."
-          Stop-WebAppPool -Name $siteName -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 2
+          Write-Host "Copying artifacts to IIS path..."
+          Write-Host "From: .\artifacts"
+          Write-Host "To: $sitePath"
           
           # Ensure directory exists
           if (!(Test-Path $sitePath)) {
               New-Item -ItemType Directory -Path $sitePath -Force
           }
           
-          # Delete all files EXCEPT web.config
-          Write-Host "Cleaning old files (keeping web.config)..."
-          Get-ChildItem -Path $sitePath -Exclude "web.config" | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+          # Simple copy - overwrite existing files
+          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
           
-          # Copy new files (excluding web.config from source if it exists)
-          Write-Host "Copying new files..."
-          $sourceItems = Get-ChildItem -Path ".\artifacts" -Exclude "web.config"
-          if ($sourceItems) {
-              Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force -Exclude "web.config"
-          }
-          
-          # Restart App Pool
-          Write-Host "Starting App Pool..."
-          Start-WebAppPool -Name $siteName -ErrorAction SilentlyContinue
-          
-          Write-Host "✅ Deployment completed!"
-          Write-Host "🌐 Application available at: http://localhost:8080"
+          Write-Host "✅ Files copied successfully"
