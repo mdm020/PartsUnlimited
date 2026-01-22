@@ -1,81 +1,34 @@
-name: CI/CD Pipeline
+name: Build and Deploy
 on:
   push:
     branches: [main, master]
-  pull_request:
-    branches: [main, master]
 
 jobs:
-  # CI: Build and Create Artifact
-  ci:
+  deploy:
     runs-on: windows-latest
     
     steps:
-      # Checkout code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Setup NuGet
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
-      # Restore packages
-      - name: Restore NuGet packages
+      - name: Restore packages
         run: nuget restore PartsUnlimited.sln
 
-      # Setup MSBuild
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Build solution
-      - name: Build & Publish Website
+      - name: Build and Deploy Directly
         run: |
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
             /p:Configuration=Release `
             /p:Platform=AnyCPU `
             /p:DeployOnBuild=true `
             /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=..\..\artifact `
-            /p:DeployTarget=WebPublish
-
-      # Upload artifact for CD
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: artifact
-
-  # CD: Simple file copy to IIS path
-  cd:
-    needs: ci
-    runs-on: self-hosted
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
-    
-    steps:
-      # Download build artifacts
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: ./artifacts
-      
-      # Simple file copy to IIS path
-      - name: Copy to IIS Path
-        shell: powershell
-        run: |
-          $sitePath = "C:\inetpub\wwwroot\PartsUnlimited"
+            /p:PublishUrl="C:\inetpub\wwwroot\PartsUnlimited" `
+            /p:DeployTarget=WebPublish `
+            /p:DeleteExistingFiles=True
           
-          Write-Host "Copying artifacts to IIS path..."
-          Write-Host "From: .\artifacts"
-          Write-Host "To: $sitePath"
-          
-          # Ensure directory exists
-          if (!(Test-Path $sitePath)) {
-              New-Item -ItemType Directory -Path $sitePath -Force
-          }
-          
-          # Simple copy - overwrite existing files
-          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
-          
-          Write-Host "✅ Files copied successfully"
-          Write-Host "🌐 Application available at: http://localhost:8080"
+          echo "✅ Deployed to C:\inetpub\wwwroot\PartsUnlimited"
