@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline with Security
 
 on:
   push:
@@ -6,9 +6,36 @@ on:
   pull_request:
     branches: [ main, master ]
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
-  # CI: Build and Test
-  ci:
+  # Security Scanning
+  security:
+    name: 🔒 Security Scan
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        queries: security-extended,security-and-quality
+    
+    # For .NET Framework projects, use autobuild
+    - name: Autobuild for CodeQL
+      uses: github/codeql-action/autobuild@v3
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # Build and Test
+  build-test:
+    name: 🏗️ Build and Test
     runs-on: windows-latest
 
     steps:
@@ -16,7 +43,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Setup NuGet and restore packages ONCE
+      # Setup NuGet and restore packages
       - name: Setup NuGet
         uses: NuGet/setup-nuget@v2
 
@@ -28,7 +55,7 @@ jobs:
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      # Build solution & publish website (using packages folder explicitly)
+      # Build solution & publish website
       - name: Build & Publish Website
         run: |
           msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
@@ -58,27 +85,93 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
             Select-Object -First 1
-          Write-Host "Using vstest: $vstest"
           
           $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
             Where-Object { $_.FullName -like "*\bin\Release\*" } |
             Select-Object -ExpandProperty FullName
           
           if ($testDlls) {
-            Write-Host "Found test DLLs:"
-            $testDlls | ForEach-Object { Write-Host "  $_" }
             & "$vstest" $testDlls /Platform:x64 /Logger:trx
-          } else {
-            Write-Host "No test DLLs found"
           }
         continue-on-error: true
+
+      # Vulnerability Check on Dependencies
+      - name: Check for Vulnerable Dependencies
+        shell: pwsh
+        run: |
+          Write-Host "=== SECURITY: Checking for vulnerable packages ===" -ForegroundColor Yellow
+          
+          # Check for known vulnerable packages
+          $vulnerablePackages = @{
+            "bootstrap" = "3.3.7"
+            "jQuery" = "3.1.1"
+            "Newtonsoft.Json" = "9.0.1"
+            "Microsoft.Owin" = "3.0.1"
+          }
+          
+          $packagesConfig = Get-Content "src\PartsUnlimitedWebsite\packages.config" -Raw
+          $foundVulnerabilities = $false
+          
+          foreach ($pkg in $vulnerablePackages.GetEnumerator()) {
+            if ($packagesConfig -match "package id=`"$($pkg.Name)`"") {
+              Write-Host "⚠️  WARNING: $($pkg.Name) $($pkg.Value) has known vulnerabilities" -ForegroundColor Red
+              Write-Host "   Consider upgrading to latest version" -ForegroundColor Yellow
+              $foundVulnerabilities = $true
+            }
+          }
+          
+          if (-not $foundVulnerabilities) {
+            Write-Host "✅ No highly vulnerable packages detected" -ForegroundColor Green
+          }
+
+      # Secret Scanning
+      - name: Scan for Secrets
+        shell: pwsh
+        run: |
+          Write-Host "=== SECURITY: Scanning for hardcoded secrets ===" -ForegroundColor Yellow
+          
+          $patterns = @(
+            '(?i)password\s*=\s*["''][^"\'\n]{8,}["'']',
+            '(?i)connectionString\s*=\s*["''][^"\'\n]{20,}["'']',
+            '(?i)api[_-]?key\s*=\s*["''][^"\'\n]{10,}["'']',
+            '(?i)secret[_-]?key\s*=\s*["''][^"\'\n]{10,}["'']',
+            '(?i)token\s*=\s*["''][^"\'\n]{10,}["'']',
+            'aws[_-]?key\s*=\s*["''][^"\'\n]{10,}["'']'
+          )
+          
+          $filesToScan = @(
+            "**/*.config",
+            "**/*.json", 
+            "**/*.cs",
+            "**/*.cshtml"
+          )
+          
+          $foundSecrets = $false
+          foreach ($file in (Get-ChildItem -Path $filesToScan -Recurse -File)) {
+            $content = Get-Content $file.FullName -Raw
+            foreach ($pattern in $patterns) {
+              if ($content -match $pattern) {
+                Write-Host "❌ POTENTIAL SECRET FOUND:" -ForegroundColor Red
+                Write-Host "   File: $($file.FullName)" -ForegroundColor Yellow
+                Write-Host "   Pattern: $pattern" -ForegroundColor Gray
+                $foundSecrets = $true
+              }
+            }
+          }
+          
+          if ($foundSecrets) {
+            Write-Host "`n❌ SECURITY ISSUE: Hardcoded secrets detected!" -ForegroundColor Red
+            Write-Host "   Remove secrets from code and use secure storage" -ForegroundColor Yellow
+            exit 1
+          } else {
+            Write-Host "✅ No hardcoded secrets found" -ForegroundColor Green
+          }
 
       # Verify artifact
       - name: Verify artifact folder
         run: |
           if (Test-Path "artifact") {
             Write-Host "✅ Artifact folder created successfully"
-            Get-ChildItem artifact -Recurse | Select-Object -First 10 FullName
           } else {
             Write-Host "❌ Artifact folder not found"
             exit 1
@@ -91,9 +184,10 @@ jobs:
           name: PartsUnlimited-Web
           path: artifact
 
-  # CD: Deploy to IIS
+  # Deploy to IIS
   deploy:
-    needs: ci
+    name: 🚀 Deploy to Production
+    needs: [security, build-test]
     runs-on: self-hosted
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
@@ -111,7 +205,7 @@ jobs:
         run: |
           $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
           
-          Write-Host "Deploying to: $sitePath"
+          Write-Host "🚀 Deploying to: $sitePath"
           
           # Ensure directory exists
           if (!(Test-Path $sitePath)) {
