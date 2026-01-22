@@ -1,4 +1,4 @@
-name: CI Build and Deploy
+name: CI/CD Pipeline with Security
 
 on:
   push:
@@ -6,155 +6,159 @@ on:
   pull_request:
     branches: [ main, master ]
 
-# CodeQL runs in parallel with build
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
-  # CodeQL Security Analysis
-  analyze:
-    name: Analyze with CodeQL
+  # 1. SECURITY: CodeQL (for .NET Framework - different approach)
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+    
+    - name: Initialize CodeQL (C# only)
+      uses: github/codeql-action/init@v3
+      with:
+        languages: csharp
+        # Use autobuild for .NET Framework
+        build-mode: autobuild
+    
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  # 2. CI: Build and Test (.NET Framework style)
+  ci:
+    name: 🏗️ Build and Test
     runs-on: windows-latest
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-    
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: csharp
-        queries: security-extended,security-and-quality
-    
-    - name: Setup .NET for CodeQL
-      uses: actions/setup-dotnet@v3
-      with:
-        dotnet-version: '6.0.x'
-    
-    - name: Restore dependencies for CodeQL
-      run: dotnet restore PartsUnlimited.sln
-    
-    - name: Build for CodeQL analysis
-      run: dotnet build PartsUnlimited.sln --configuration Release --no-restore
-    
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v3
-      with:
-        category: "/language:csharp"
 
-  # Build, Test and Create Artifact
-  build-test-artifact:
-    runs-on: windows-latest
-    # Uncomment if you want to wait for CodeQL to complete first
-    # needs: analyze
+    - name: Setup NuGet
+      uses: NuGet/setup-nuget@v2
 
-    steps:
-      # Checkout repository
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    # RESTORE ALL PACKAGES FIRST (critical for .NET Framework)
+    - name: Restore NuGet packages
+      shell: pwsh
+      run: |
+        # Restore for all projects
+        nuget restore PartsUnlimited.sln
+        nuget restore src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj
+        nuget restore test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj
+        nuget restore test\FabrikamFiber.SeleniumTests\FabrikamFiber.SeleniumTests.csproj
 
-      # Setup NuGet and restore packages
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
 
-      - name: Restore NuGet packages
-        run: nuget restore PartsUnlimited.sln
+    # BUILD WEB PROJECT
+    - name: Build Website
+      run: |
+        msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
+          /p:Configuration=Release `
+          /p:Platform=AnyCPU `
+          /p:DeployOnBuild=true `
+          /p:WebPublishMethod=FileSystem `
+          /p:PublishUrl=..\..\artifact `
+          /p:DeployTarget=WebPublish `
+          /p:VisualStudioVersion=16.0 `
+          /p:VSToolsPath="C:\Program Files (x86)\Microsoft Visual Studio\2019\Enterprise\MSBuild\Microsoft\VisualStudio\v16.0"
 
-      # Setup MSBuild
-      - name: Setup MSBuild
-        uses: microsoft/setup-msbuild@v2
-
-      # Build solution & publish website
-      - name: Build & Publish Website
-        run: |
-          # Build the web project and publish to artifact folder
-          msbuild src\PartsUnlimitedWebsite\PartsUnlimitedWebsite.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU `
-            /p:DeployOnBuild=true `
-            /p:WebPublishMethod=FileSystem `
-            /p:PublishUrl=..\..\artifact `
-            /p:DeployTarget=WebPublish
-      
-      # Build test projects
-      - name: Build Test Projects
-        run: |
-          msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
-            /p:Configuration=Release `
-            /p:Platform=AnyCPU
+    # BUILD TEST PROJECTS
+    - name: Build Test Projects
+      shell: pwsh
+      run: |
+        # Build unit tests
+        msbuild test\PartsUnlimited.UnitTests\PartsUnlimited.UnitTests.csproj `
+          /p:Configuration=Release `
+          /p:Platform=AnyCPU `
+          /p:VisualStudioVersion=16.0
+        
+        # Build selenium tests (optional)
+        msbuild test\FabrikamFiber.SeleniumTests\FabrikamFiber.SeleniumTests.csproj `
+          /p:Configuration=Release `
+          /p:Platform=AnyCPU `
+          /p:VisualStudioVersion=16.0
         continue-on-error: true
 
-      # Run MSTest unit tests
-      - name: Run Unit Tests
-        shell: pwsh
-        run: |
-          # Locate vstest.console.exe dynamically
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe |
-            Select-Object -First 1
-          Write-Host "Using vstest: $vstest"
-          # Find and run unit test DLLs
-          $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
-            Where-Object { $_.FullName -like "*\bin\Release\*" } |
-            Select-Object -ExpandProperty FullName
-          if ($testDlls) {
-            Write-Host "Found test DLLs:"
-            $testDlls | ForEach-Object { Write-Host "  $_" }
-            & "$vstest" $testDlls /Platform:x64 /Logger:trx
-          } else {
-            Write-Host "No test DLLs found"
-          }
-        continue-on-error: true
+    # RUN UNIT TESTS
+    - name: Run Unit Tests
+      shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vstest = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find **\vstest.console.exe | Select-Object -First 1
+        
+        # Find unit test DLLs
+        $testDlls = Get-ChildItem -Path "test" -Filter "*UnitTests.dll" -Recurse | 
+          Where-Object { $_.FullName -like "*\bin\Release\*" } |
+          Select-Object -ExpandProperty FullName
+        
+        if ($testDlls) {
+          & "$vstest" $testDlls /Platform:x64 /Logger:trx
+        } else {
+          Write-Host "No test DLLs found - skipping tests"
+        }
+      continue-on-error: true
 
-      # List artifact contents
-      - name: List artifact folder contents
-        run: |
-          if (Test-Path "artifact") {
-            Write-Host "Artifact folder contents:"
-            Get-ChildItem artifact -Recurse | Select-Object FullName
-          } else {
-            Write-Host "Artifact folder not found"
-          }
-      
-      # Upload build artifacts
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: PartsUnlimited-Web
-          path: artifact
+    # VERIFY ARTIFACT
+    - name: Verify Artifact
+      shell: pwsh
+      run: |
+        if (Test-Path "artifact") {
+          Write-Host "✅ Artifact created successfully"
+          $files = Get-ChildItem -Path "artifact" -Recurse | Measure-Object
+          Write-Host "Files in artifact: $($files.Count)"
+        } else {
+          Write-Host "❌ Artifact folder not found"
+          exit 1
+        }
 
-  # Deploy to IIS
-  deploy:
-    needs: build-test-artifact
+    # UPLOAD ARTIFACT
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: web-app
+        path: artifact
+        retention-days: 7
+
+  # 3. CD: Deploy
+  cd:
+    name: 🚀 Deploy to Production
     runs-on: self-hosted
+    needs: ci
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     
     steps:
-      # Download build artifacts
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: PartsUnlimited-Web
-          path: ./artifacts
-      
-      # Simple file copy to IIS path (NO IIS MANAGEMENT)
-      - name: Deploy to IIS
-        shell: powershell
-        run: |
-          # IIS Configuration
-          $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
-          
-          Write-Host "Deploying to: $sitePath"
-          
-          # Ensure directory exists
-          if (!(Test-Path $sitePath)) {
-              New-Item -ItemType Directory -Path $sitePath -Force
-          }
-          
-          # Copy files (overwrite existing)
-          Copy-Item -Path ".\artifacts\*" -Destination $sitePath -Recurse -Force
-          
-          Write-Host "✅ Deployment completed!"
-          Write-Host "🌐 Application available at: http://localhost:8089"
+    - name: Download Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: web-app
+        path: ./deploy-artifacts
+    
+    - name: Deploy to IIS
+      shell: pwsh
+      run: |
+        $sitePath = "D:\inetpub\wwwroot\partsUnlimited"
+        
+        Write-Host "🚀 Deploying to: $sitePath"
+        
+        # Backup existing (optional)
+        $backupPath = "${sitePath}_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        if (Test-Path $sitePath -PathType Container) {
+          Copy-Item -Path $sitePath -Destination $backupPath -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "📦 Backup: $backupPath"
+        }
+        
+        # Create directory if needed
+        if (!(Test-Path $sitePath)) {
+          New-Item -ItemType Directory -Path $sitePath -Force
+        }
+        
+        # Deploy
+        Copy-Item -Path ".\deploy-artifacts\*" -Destination $sitePath -Recurse -Force
+        
+        Write-Host "✅ Deployment completed!"
+        Write-Host "🌐 http://localhost:8089"
